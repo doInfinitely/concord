@@ -92,6 +92,7 @@ private struct ConversationRow: View {
 
     @State private var unread: Int? = nil
     @State private var online = false
+    @State private var presenceListener: ListenerRegistration?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -134,25 +135,25 @@ private struct ConversationRow: View {
         .contentShape(Rectangle())
         .padding(.vertical, 6)
         .onAppear {
-            // unread listener
-            if let me = myUid {
-                Firestore.firestore()
-                    .collection("conversations").document(convo.id)
-                    .collection("unreads").document(me)
-                    .addSnapshotListener { snap, _ in
-                        unread = (snap?.data()?["count"] as? Int) ?? 0
-                    }
-            }
-            // presence (for DM case)
             if convo.memberCount == 2, let me = myUid,
                let other = convo.members.first(where: { $0 != me }) {
-                Firestore.firestore().collection("users").document(other)
+                presenceListener = Firestore.firestore()
+                    .collection("users").document(other)
                     .addSnapshotListener { snap, _ in
                         if let ts = (snap?.data()?["lastSeen"] as? Timestamp)?.dateValue() {
-                            online = Date().timeIntervalSince(ts) < 45
+                            DispatchQueue.main.async {
+                                let window = PresenceService.onlineWindow
+                                online = Date().timeIntervalSince(ts) < window
+                            }
+                        } else {
+                            DispatchQueue.main.async { online = false }
                         }
                     }
             }
+        }
+        .onDisappear {
+            presenceListener?.remove()
+            presenceListener = nil
         }
     }
 

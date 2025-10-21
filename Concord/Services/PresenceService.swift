@@ -9,6 +9,7 @@ import Foundation
 import FirebaseFirestore
 
 final class PresenceService {
+    static let onlineWindow: TimeInterval = 45 // seconds
     private let db = Firestore.firestore()
     private var loopTask: Task<Void, Never>?
 
