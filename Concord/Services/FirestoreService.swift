@@ -42,9 +42,10 @@ final class FirestoreService {
 
     // Send a message and update lastMessage fields atomically.
     func sendMessage(conversationId: String, senderId: String, text: String) async throws {
-        let convRef = db.collection("conversations").document(conversationId)
+        let convRef = db.collection("conversations").document(conversationId)   // ← declare once
         let msgRef  = convRef.collection("messages").document()
 
+        // Batch: create message + update lastMessage
         let batch = db.batch()
         batch.setData([
             "senderId": senderId,
@@ -52,13 +53,27 @@ final class FirestoreService {
             "createdAt": FieldValue.serverTimestamp(),
             "status": "sent"
         ], forDocument: msgRef)
+
         batch.updateData([
             "lastMessageText": text,
             "lastMessageAt": FieldValue.serverTimestamp()
         ], forDocument: convRef)
 
+        // (Optional MVP) increment unreads for other members
+        do {
+            let convSnap = try await convRef.getDocument()
+            let members = (convSnap.data()?["members"] as? [String]) ?? []
+            for uid in members where uid != senderId {
+                let unreadRef = convRef.collection("unreads").document(uid)
+                batch.setData(["count": FieldValue.increment(Int64(1))], forDocument: unreadRef, merge: true)
+            }
+        } catch {
+            // ignore unread bump failures for MVP
+        }
+
         try await commitBatchAsync(batch)
     }
+
 
     // Real-time messages listener (chronological)
     @discardableResult
@@ -88,14 +103,15 @@ final class FirestoreService {
 
     // MARK: - Explicit async wrappers (no generic-parameter ambiguity)
 
-    private func setDataAsync(ref: DocumentReference, data: [String: Any]) async throws {
+    private func setDataAsync(ref: DocumentReference, data: [String: Any], merge: Bool = false) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            ref.setData(data) { err in
+            ref.setData(data, merge: merge) { err in
                 if let err = err { cont.resume(throwing: err) }
                 else { cont.resume(returning: ()) }
             }
         }
     }
+
 
     private func commitBatchAsync(_ batch: WriteBatch) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -114,5 +130,130 @@ final class FirestoreService {
             }
         }
     }
+    
+    func openOrCreateDM(me: String, other: String) async throws -> String {
+        let key = dmKey(me, other)
+        let docId = "dm_\(key)" // deterministic id: dm_<min>__<max>
+        let ref = db.collection("conversations").document(docId)
+
+        // Blind upsert — no read
+        let data: [String: Any] = [
+            "members": [me, other],
+            "memberCount": 2,
+            "dmKey": key,
+            "createdAt": FieldValue.serverTimestamp()
+        ]
+        print("DM upsert data:", data, "docId:", docId)
+
+        // Use merge:true so if it already exists, we don't clobber anything
+        try await setDataAsync(ref: ref, data: data, merge: true)
+        return ref.documentID
+    }
+    // Conversation inbox listener: newest first
+    @discardableResult
+    func listenConversations(for uid: String,
+                             onChange: @escaping ([Conversation]) -> Void) -> ListenerRegistration {
+        let q = db.collection("conversations")
+            .whereField("members", arrayContains: uid)
+            .order(by: "lastMessageAt", descending: true) // falls back to createdAt if lastMessageAt is nil
+        return q.addSnapshotListener { snap, _ in
+            guard let docs = snap?.documents else { return }
+            let items: [Conversation] = docs.map { doc in
+                let d = doc.data()
+                return Conversation(
+                    id: doc.documentID,
+                    members: (d["members"] as? [String]) ?? [],
+                    memberCount: (d["memberCount"] as? Int) ?? 0,
+                    name: d["name"] as? String,
+                    lastMessageText: d["lastMessageText"] as? String,
+                    lastMessageAt: (d["lastMessageAt"] as? Timestamp)?.dateValue()
+                )
+            }
+            onChange(items)
+        }
+    }
+    func clearUnreads(conversationId: String, uid: String) async {
+        let ref = db.collection("conversations")
+            .document(conversationId)
+            .collection("unreads")
+            .document(uid)
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                ref.setData(["count": 0], merge: true) { err in
+                    err == nil ? cont.resume(returning: ()) : cont.resume(throwing: err!)
+                }
+            }
+        } catch {
+            // optional: print("clearUnreads error:", error.localizedDescription)
+        }
+    }
+    func loadOlderMessages(conversationId: String,
+                           before: QueryDocumentSnapshot?,           // ← use QueryDocumentSnapshot?
+                           pageSize: Int = 30) async throws -> ([Message], QueryDocumentSnapshot?) {
+        var q: Query = db.collection("conversations").document(conversationId)
+            .collection("messages")
+            .order(by: "createdAt", descending: true)
+            .limit(to: pageSize)
+        if let before { q = q.start(afterDocument: before) }
+
+        let snap = try await getDocumentsAsync(query: q)
+        let docs = snap.documents
+        // make it a real Array in chronological order:
+        let msgs = Array(docs.compactMap { doc -> Message? in
+            let d = doc.data()
+            return Message(
+                id: doc.documentID,
+                senderId: d["senderId"] as? String ?? "",
+                text: d["text"] as? String ?? "",
+                createdAt: (d["createdAt"] as? Timestamp)?.dateValue(),
+                status: d["status"] as? String
+            )
+        }.reversed())
+
+        return (msgs, docs.last) // last doc becomes next cursor
+    }
+    func setTyping(conversationId: String, uid: String, isTyping: Bool) async {
+        let ref = db.collection("conversations").document(conversationId)
+            .collection("typing").document(uid)
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                ref.setData(["isTyping": isTyping,
+                             "updatedAt": FieldValue.serverTimestamp()], merge: true) { err in
+                    err == nil ? cont.resume(returning: ()) : cont.resume(throwing: err!)
+                }
+            }
+        } catch { /* ignore for MVP */ }
+    }
+
+    @discardableResult
+    func listenTyping(conversationId: String,
+                      onChange: @escaping ([String: Bool]) -> Void) -> ListenerRegistration {
+        let ref = db.collection("conversations").document(conversationId)
+            .collection("typing")
+        return ref.addSnapshotListener { snap, _ in
+            var map: [String: Bool] = [:]
+            snap?.documents.forEach { d in map[d.documentID] = (d["isTyping"] as? Bool) ?? false }
+            onChange(map)
+        }
+    }
+    func updateReadReceipt(conversationId: String, uid: String, lastReadAt: Date) async {
+        let ref = db.collection("conversations").document(conversationId)
+            .collection("readReceipts").document(uid)
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                ref.setData(["lastReadAt": Timestamp(date: lastReadAt)], merge: true) { err in
+                    err == nil ? cont.resume(returning: ()) : cont.resume(throwing: err!)
+                }
+            }
+        } catch {
+            // optional: print("updateReadReceipt error:", error.localizedDescription)
+        }
+    }
+
+}
+
+private func dmKey(_ a: String, _ b: String) -> String {
+    let (x, y) = a < b ? (a, b) : (b, a)
+    return "\(x)__\(y)"
 }
 

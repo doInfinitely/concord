@@ -8,21 +8,26 @@
 import Foundation
 import FirebaseFirestore
 
-struct Conversation {
+
+struct Conversation: Identifiable, Hashable {
     let id: String
     var members: [String]
     var memberCount: Int
     var name: String?
     var lastMessageText: String?
     var lastMessageAt: Date?
+
+    // Hash/Equatable by id
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (lhs: Conversation, rhs: Conversation) -> Bool { lhs.id == rhs.id }
 }
 
-struct Message {
+struct Message: Identifiable {
     let id: String
     let senderId: String
     let text: String
     let createdAt: Date?
-    let status: String? // "sending" | "sent" | etc.
+    let status: String?
 }
 
 enum FS {
