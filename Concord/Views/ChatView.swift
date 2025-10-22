@@ -4,12 +4,21 @@
 //
 //  Created by Remy Ochei on 10/20/25.
 //
+// FIX: Read receipt updates properly when receiver views messages
 
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 
-func waitForUID(timeoutSeconds: Double = 5.0) async -> String? {
+// Preference key for measuring read receipt width
+fileprivate struct ReadReceiptWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+fileprivate func waitForUID(timeoutSeconds: Double = 5.0) async -> String? {
     let deadline = Date().addingTimeInterval(timeoutSeconds)
     while Auth.auth().currentUser?.uid == nil && Date() < deadline {
         try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
@@ -31,6 +40,9 @@ struct ChatView: View {
 
     // Read receipts debounce
     @State private var receiptTask: Task<Void, Never>? = nil
+    @State private var readReceipts: [String: Date] = [:]
+    @State private var rrListener: ListenerRegistration?
+    @State private var isViewActive = false // Track if view is actively being displayed
 
     // Typing indicator
     @State private var othersTyping = false
@@ -42,7 +54,7 @@ struct ChatView: View {
 
     private let typingInactivityGrace: TimeInterval = 0.05  // wait this long after last event
     private let typingMinVisible: TimeInterval = 0.9       // ensure UI stays visible at least this long
-
+    
     private let store = FirestoreService()
     
     @ViewBuilder
@@ -74,9 +86,16 @@ struct ChatView: View {
 
     private func send(trimmed: String, uid: String) {
         Task {
+            let old = text
             text = ""
-            try? await store.sendMessage(conversationId: conversationId, senderId: uid, text: trimmed)
-            await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false)
+            do {
+                try await store.sendMessage(conversationId: conversationId, senderId: uid, text: trimmed)
+                await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false)
+            } catch {
+                // restore text so it's not "eaten" on failure
+                await MainActor.run { text = old }
+                print("sendMessage failed:", error.localizedDescription)
+            }
         }
     }
     
@@ -129,6 +148,39 @@ struct ChatView: View {
             }
         }
     }
+    
+    private func attachReadReceiptsListener() {
+        rrListener?.remove()
+        let rrRef = Firestore.firestore()
+            .collection("conversations").document(conversationId)
+            .collection("readReceipts")
+
+        rrListener = rrRef.addSnapshotListener { snap, _ in
+            var map: [String: Date] = [:]
+            snap?.documents.forEach { d in
+                if let ts = d.data()["lastReadAt"] as? Timestamp {
+                    map[d.documentID] = ts.dateValue()
+                }
+            }
+            print("🔔 Read receipts updated: \(map.mapValues { $0.formatted() })")
+            DispatchQueue.main.async { readReceipts = map }
+        }
+    }
+
+    private func updateMyReadReceiptIfNeeded() {
+        guard isViewActive,
+              !messages.isEmpty,
+              let uid = Auth.auth().currentUser?.uid else { return }
+
+        receiptTask?.cancel()
+        receiptTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000) // debounce
+            guard isViewActive else { return } // Double check before updating
+            // Use current time to represent when user viewed the messages
+            await store.updateReadReceipt(conversationId: conversationId, uid: uid, lastReadAt: Date())
+            print("🔄 Read receipt updated via onChange to: \(Date())")
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -159,6 +211,7 @@ struct ChatView: View {
                     loadingOlder: loadingOlder,
                     rowWidth: rowWidth,
                     conversation: conversation,
+                    readReceiptsMap: readReceipts,
                     loadOlder: {
                         Task {
                             loadingOlder = true
@@ -171,25 +224,36 @@ struct ChatView: View {
                                 )
                                 messages = older + messages
                                 cursor = nextCursor
-                            } catch { /* ignore for MVP */ }
+                            } catch { /* ignore */ }
                         }
                     }
                 )
-                .frame(maxWidth: .infinity)
+                
+                // Typing indicator UI
                 if othersTyping {
-                    Text("Typing…").font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text("typing")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TypingDotsView()
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 4)
                 }
+                
                 HStack {
-                    TextField("Message…", text: $text)
+                    TextField("Message", text: $text, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: text) { _, newValue in
+                        .lineLimit(1...5)
+                        .onChange(of: text) { oldValue, newValue in
                             guard let uid = Auth.auth().currentUser?.uid else { return }
-                            // debounce typing writes
                             typingTask?.cancel()
-                            // send "isTyping: true" immediately
-                            Task { await store.setTyping(conversationId: conversationId, uid: uid, isTyping: true) }
+                            if !newValue.isEmpty {
+                                Task {
+                                    await store.setTyping(conversationId: conversationId, uid: uid, isTyping: true)
+                                }
+                            }
                             typingTask = Task {
-                                // if no edits for 800ms, send "false"
                                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                                 await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false)
                             }
@@ -208,6 +272,9 @@ struct ChatView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .task {
+                // Set view as active
+                isViewActive = true
+                
                 // 1) Wait for auth
                 guard let uid = await waitForUID() else {
                     print("ChatView: no UID yet; aborting listeners")
@@ -238,47 +305,81 @@ struct ChatView: View {
                     DispatchQueue.main.async {
                         messages = msgs
                         
-                        // Debounced read receipt
-                        if let last = msgs.last?.createdAt {
-                            receiptTask?.cancel()
-                            receiptTask = Task {
-                                try? await Task.sleep(nanoseconds: 250_000_000)
-                                await store.updateReadReceipt(conversationId: conversationId, uid: uid, lastReadAt: last)
-                            }
+                        // Only update read receipt when view is active
+                        guard isViewActive, !msgs.isEmpty else { return }
+                        
+                        // Debounced read receipt when new messages arrive
+                        // Use current time to represent when user viewed the messages
+                        receiptTask?.cancel()
+                        receiptTask = Task {
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                            guard isViewActive else { return } // Double check before updating
+                            await store.updateReadReceipt(conversationId: conversationId, uid: uid, lastReadAt: Date())
                         }
                     }
                 }
                 
-                // 6) Attach typing listener
-                _ = store.listenTyping(conversationId: conversationId) { map in
+                // 6) Attach read receipts listener
+                attachReadReceiptsListener()
+                
+                // FIX: Wait for initial messages to load, then immediately update read receipt
+                // This ensures that when a receiver opens the chat, their read receipt updates
+                // Use CURRENT TIME to represent when the user viewed the messages
+                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms to let messages load
+                await MainActor.run {
+                    guard isViewActive, !messages.isEmpty else { return }
+                    Task {
+                        // Use current time, not message timestamp
+                        await store.updateReadReceipt(conversationId: conversationId, uid: uid, lastReadAt: Date())
+                        print("✅ Initial read receipt updated to: \(Date())")
+                    }
+                }
+                
+                // 7) Attach typing listener (recency-aware to avoid stale 'true')
+                let typingRef = Firestore.firestore()
+                    .collection("conversations").document(conversationId)
+                    .collection("typing")
+
+                typingRef.addSnapshotListener { snap, _ in
                     DispatchQueue.main.async {
                         guard let me = Auth.auth().currentUser?.uid else { return }
-                        let anyOtherTyping = map.contains { who, val in who != me && val }
                         let now = Date()
+                        // consider "typing" only if updated within last 2 seconds
+                        let freshness: TimeInterval = 2.0
 
-                        if anyOtherTyping {
-                            // show immediately
-                            typingLastSeenAt = now
+                        var someoneElseTyping = false
+                        snap?.documents.forEach { d in
+                            let uid = d.documentID
+                            guard uid != me else { return }
+                            let data = d.data()
+                            let isTyping = (data["isTyping"] as? Bool) ?? false
+                            let ts = (data["updatedAt"] as? Timestamp)?.dateValue()
+                            if isTyping, let ts, now.timeIntervalSince(ts) <= freshness {
+                                someoneElseTyping = true
+                            }
+                        }
+
+                        let nowDate = Date()
+                        if someoneElseTyping {
+                            // show immediately, same min-visible logic you already had
+                            typingLastSeenAt = nowDate
                             if !othersTyping {
                                 othersTyping = true
-                                typingVisibleSince = now
+                                typingVisibleSince = nowDate
                             }
-                            // schedule hide after inactivity grace (resets on new events)
-                            typingHideTask?.cancel()
-                            typingHideTask = Task {
-                                try? await Task.sleep(nanoseconds: UInt64(typingInactivityGrace * 1_000_000_000))
-                                await MainActor.run {
-                                    // if we've seen a newer typing event, this task is obsolete
-                                    guard let last = typingLastSeenAt, Date().timeIntervalSince(last) >= typingInactivityGrace else { return }
-
-                                    // honor the minimum visible time
-                                    let shown = Date().timeIntervalSince(typingVisibleSince ?? now)
+                        } else {
+                            typingLastSeenAt = nowDate
+                            if othersTyping {
+                                typingHideTask?.cancel()
+                                typingHideTask = nil
+                                if let vis = typingVisibleSince {
+                                    let shown = nowDate.timeIntervalSince(vis)
                                     if shown < typingMinVisible {
                                         let wait = typingMinVisible - shown
                                         Task { @MainActor in
                                             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                                            // Double-check we didn't see new typing in the meantime
-                                            guard let last2 = typingLastSeenAt, Date().timeIntervalSince(last2) >= typingInactivityGrace else { return }
+                                            guard let last2 = typingLastSeenAt,
+                                                  Date().timeIntervalSince(last2) >= typingInactivityGrace else { return }
                                             othersTyping = false
                                             typingVisibleSince = nil
                                         }
@@ -288,32 +389,28 @@ struct ChatView: View {
                                     typingVisibleSince = nil
                                 }
                             }
-                        } else {
-                            // Everyone explicitly false; still honor min visible
-                            if othersTyping {
-                                typingHideTask?.cancel()
-                                typingHideTask = Task {
-                                    let shown = Date().timeIntervalSince(typingVisibleSince ?? now)
-                                    if shown < typingMinVisible {
-                                        try? await Task.sleep(nanoseconds: UInt64((typingMinVisible - shown) * 1_000_000_000))
-                                    }
-                                    await MainActor.run {
-                                        // If a new typing event arrived meanwhile, don't hide
-                                        guard let last = typingLastSeenAt, Date().timeIntervalSince(last) >= typingInactivityGrace else { return }
-                                        othersTyping = false
-                                        typingVisibleSince = nil
-                                    }
-                                }
-                            }
                         }
                     }
                 }
             }
+            .onChange(of: messages.last?.id) { _ in
+                updateMyReadReceiptIfNeeded()
+            }
             .onDisappear {
+                // Mark view as inactive
+                isViewActive = false
+                print("❌ View disappeared, marked inactive")
+                
+                // existing typing cleanup
                 typingTask?.cancel()
                 if let uid = Auth.auth().currentUser?.uid {
                     Task { await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false) }
                 }
+
+                // add these two lines for read receipts cleanup
+                rrListener?.remove()
+                rrListener = nil
+                receiptTask?.cancel()
             }
         }
     }
@@ -327,6 +424,7 @@ private struct MessagesListView: View {
     let loadingOlder: Bool
     let rowWidth: CGFloat
     let conversation: Conversation?
+    let readReceiptsMap: [String: Date]
     let loadOlder: () -> Void
 
     var body: some View {
@@ -346,12 +444,27 @@ private struct MessagesListView: View {
 
                     // In your ScrollView, update the MessageRow call:
                     ForEach(messages, id: \.id) { m in
+                        let meUid = me
+                        let isMine = (m.senderId == meUid)
+                        let lastMyMessageId = messages.last(where: { $0.senderId == meUid })?.id
+
+                        let otherUserLastRead: Date? = {
+                            guard let convo = conversation,
+                                  convo.memberCount == 2,
+                                  let me = meUid,
+                                  let other = convo.members.first(where: { $0 != me }) else { return nil }
+                            return readReceiptsMap[other]
+                        }()
+
                         MessageRow(
                             message: m,
-                            isMe: (m.senderId == me),
+                            isMe: isMine,
                             cap: cap,
                             rowWidth: rowWidth,
-                            conversation: conversation
+                            conversation: conversation,
+                            otherUserLastRead: otherUserLastRead,
+                            allReadReceipts: readReceiptsMap,
+                            isLastMessage: (m.id == lastMyMessageId)
                         )
                     }
                 }
@@ -377,13 +490,19 @@ private struct MessageRow: View {
     let cap: CGFloat
     let rowWidth: CGFloat
     let conversation: Conversation?
+    let otherUserLastRead: Date?
+    let allReadReceipts: [String: Date]
+    let isLastMessage: Bool
     
     @State private var bubbleWidth: CGFloat = 0
     @State private var senderName: String?
+    @State private var readReceiptWidth: CGFloat = 0
 
     var body: some View {
         let paddingNeeded = isMe ? 12 - (cap - bubbleWidth) : 12
+        let readReceiptTrailingInset = max(0, cap - bubbleWidth)
         let isGroupChat = (conversation?.memberCount ?? 0) > 2
+        let isDM = (conversation?.memberCount ?? 0) == 2
         
         HStack(spacing: 0) {
             if isMe { Spacer(minLength: 0) }
@@ -423,6 +542,17 @@ private struct MessageRow: View {
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .frame(maxWidth: cap, alignment: .leading)
+                
+                if isMe, isLastMessage {
+                    Text(readStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                        // lay out inside the same cap-width rail as the bubble...
+                        .frame(maxWidth: cap, alignment: .trailing)
+                        // ...then nudge it left so its trailing edge matches the bubble's trailing edge
+                        .padding(.trailing, readReceiptTrailingInset)
+                }
             }
             
             if !isMe { Spacer(minLength: 0) }
@@ -434,6 +564,44 @@ private struct MessageRow: View {
             if !isMe, isGroupChat {
                 await loadSenderName()
             }
+        }
+    }
+    
+    private var readStatus: String {
+        guard let messageTime = message.createdAt else {
+            return "Delivered"
+        }
+        
+        let isGroupChat = (conversation?.memberCount ?? 0) > 2
+        
+        // inside readStatus:
+        if isGroupChat {
+            guard let convo = conversation else { return "Delivered" }
+            let others = Set(convo.members).subtracting([message.senderId])
+            let totalOthers = others.count
+            let readCount = allReadReceipts.reduce(0) { acc, kv in
+                let (uid, lastRead) = kv
+                // lastRead must be >= messageTime (with small tolerance for clock skew)
+                let isRead = others.contains(uid) && lastRead.timeIntervalSince(messageTime) >= -0.1
+                return acc + (isRead ? 1 : 0)
+            }
+            return readCount == 0 ? "Delivered" : "Read \(readCount)/\(totalOthers)"
+        } else {
+            if let lastRead = otherUserLastRead {
+                // Debug logging
+                print("📖 Read receipt check:")
+                print("  Message time: \(messageTime)")
+                print("  Last read: \(lastRead)")
+                print("  Difference: \(lastRead.timeIntervalSince(messageTime)) seconds")
+                
+                // lastRead must be >= messageTime (only allow tiny tolerance for Firestore precision)
+                // If lastRead is before messageTime (negative difference), message hasn't been read yet
+                let timeDiff = lastRead.timeIntervalSince(messageTime)
+                let isRead = timeDiff >= -0.1  // Allow 100ms tolerance for timestamp precision
+                print("  Is read: \(isRead)")
+                return isRead ? "Read" : "Delivered"
+            }
+            return "Delivered"
         }
     }
     
@@ -453,5 +621,30 @@ private struct MessageRow: View {
     
     private func shortUid(_ uid: String) -> String {
         uid.count <= 8 ? uid : "\(uid.prefix(4))…\(uid.suffix(4))"
+    }
+}
+
+// Add this view for typing indicator dots animation
+private struct TypingDotsView: View {
+    @State private var animating = false
+    
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<3) { index in
+                Circle()
+                    .fill(Color.secondary)
+                    .frame(width: 4, height: 4)
+                    .opacity(animating ? 0.3 : 1.0)
+                    .animation(
+                        Animation.easeInOut(duration: 0.6)
+                            .repeatForever()
+                            .delay(Double(index) * 0.2),
+                        value: animating
+                    )
+            }
+        }
+        .onAppear {
+            animating = true
+        }
     }
 }

@@ -93,7 +93,7 @@ final class FirestoreService {
                     id: doc.documentID,
                     senderId: (d["senderId"] as? String) ?? "",
                     text: (d["text"] as? String) ?? "",
-                    createdAt: (d["createdAt"] as? Timestamp)?.dateValue(),
+                    createdAt: (d["createdAt"] as? Timestamp)?.dateValue() ?? Date.distantPast,
                     status: d["status"] as? String
                 )
             }
@@ -236,13 +236,40 @@ final class FirestoreService {
             onChange(map)
         }
     }
+
+    @discardableResult
+    func listenReadReceipts(conversationId: String,
+                            onChange: @escaping ([String: Date]) -> Void) -> ListenerRegistration {
+        let ref = db.collection("conversations").document(conversationId)
+            .collection("readReceipts")
+        return ref.addSnapshotListener { snap, _ in
+            var m: [String: Date] = [:]
+            snap?.documents.forEach { d in
+                if let ts = d.data()["lastReadAt"] as? Timestamp {
+                    m[d.documentID] = ts.dateValue()
+                }
+            }
+            onChange(m)
+        }
+    }
     func updateReadReceipt(conversationId: String, uid: String, lastReadAt: Date) async {
+        // 🔒 Clamp to a safe range before creating FIRTimestamp
+        // Firestore supports roughly year 0001..9999, but iOS SDK will throw on extreme values.
+        let minOK = Date(timeIntervalSince1970: 0)                 // 1970-01-01 (safe baseline)
+        let maxOK = Date(timeIntervalSinceNow: 60 * 60 * 24 * 365 * 5) // now + 5 years
+        let safeDate = min(max(lastReadAt, minOK), maxOK)
+
+        // Optional sanity log (remove if noisy)
+        // if safeDate != lastReadAt { print("⚠️ Clamped read receipt from \(lastReadAt) to \(safeDate)") }
+
         let ref = db.collection("conversations").document(conversationId)
             .collection("readReceipts").document(uid)
+
         do {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                ref.setData(["lastReadAt": Timestamp(date: lastReadAt)], merge: true) { err in
-                    err == nil ? cont.resume(returning: ()) : cont.resume(throwing: err!)
+                ref.setData(["lastReadAt": Timestamp(date: safeDate)], merge: true) { err in
+                    if let err = err { cont.resume(throwing: err) }
+                    else { cont.resume(returning: ()) }
                 }
             }
         } catch {
