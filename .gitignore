@@ -1,3 +1,7 @@
 # Firebase config
 GoogleService-Info*.plist
+**/GoogleService-Info.plist
 .DS_Store
+
+# API Keys
+*.plist
