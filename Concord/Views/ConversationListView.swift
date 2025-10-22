@@ -10,68 +10,64 @@ import FirebaseAuth
 import FirebaseFirestore
 
 struct ConversationListView: View {
+    let openChat: (String) -> Void   // NEW: parent will push Chat
+
     @State private var conversations: [Conversation] = []
-    @State private var selection: Conversation?
     @State private var showStartDM = false
     @State private var errorText: String?
     private let store = FirestoreService()
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if conversations.isEmpty {
-                    ContentUnavailableView("No conversations yet",
-                                            systemImage: "bubble.left.and.bubble.right",
-                                            description: Text("Start a DM to get chatting."))
-                } else {
-                    List(conversations, id: \.id, selection: $selection) { convo in
-                        Button {
-                            selection = convo
-                        } label: {
-                            ConversationRow(convo: convo, myUid: Auth.auth().currentUser?.uid)
-                        }
-                    }
-                    .listStyle(.insetGrouped)
-                }
-            }
-            .navigationTitle("Concord")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+        Group {
+            if conversations.isEmpty {
+                ContentUnavailableView("No conversations yet",
+                                       systemImage: "bubble.left.and.bubble.right",
+                                       description: Text("Start a DM to get chatting."))
+            } else {
+                List(conversations, id: \.id) { convo in
                     Button {
-                        showStartDM = true
+                        openChat(convo.id)                 // <- tell parent to push
                     } label: {
-                        Label("Start DM", systemImage: "plus.bubble")
+                        ConversationRow(convo: convo, myUid: Auth.auth().currentUser?.uid)
                     }
                 }
+                .listStyle(.insetGrouped)
             }
-            .navigationDestination(item: $selection) { convo in
-                ChatView(conversationId: convo.id)
+        }
+        .navigationTitle("Concord")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showStartDM = true
+                } label: {
+                    Label("Start DM", systemImage: "plus.bubble")
+                }
             }
-            .sheet(isPresented: $showStartDM) {
-                if let uid = Auth.auth().currentUser?.uid {
-                    StartDMView(myUid: uid) { other in
-                        Task {
-                            do {
-                                let convId = try await store.openOrCreateDM(me: uid, other: other)
-                                selection = Conversation(id: convId, members: [uid, other], memberCount: 2, name: nil, lastMessageText: nil, lastMessageAt: nil)
-                            } catch {
-                                errorText = error.localizedDescription
-                            }
+        }
+        .sheet(isPresented: $showStartDM) {
+            if let uid = Auth.auth().currentUser?.uid {
+                StartDMView(myUid: uid) { other in
+                    Task {
+                        do {
+                            let convId = try await store.openOrCreateDM(me: uid, other: other)
+                            openChat(convId)                 // <- open newly created chat
+                        } catch {
+                            errorText = error.localizedDescription
                         }
                     }
                 }
             }
-            .overlay {
-                if let err = errorText {
-                    VStack {
-                        Spacer()
-                        Text(err)
-                            .font(.footnote)
-                            .padding(8)
-                            .background(.red.opacity(0.1))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .padding(.bottom, 8)
-                    }
+        }
+        .overlay {
+            if let err = errorText {
+                VStack {
+                    Spacer()
+                    Text(err)
+                        .font(.footnote)
+                        .padding(8)
+                        .background(.red.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .padding(.bottom, 8)
                 }
             }
         }
@@ -83,6 +79,7 @@ struct ConversationListView: View {
         }
     }
 }
+
 
 // MARK: - Row
 

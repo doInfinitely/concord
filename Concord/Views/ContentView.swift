@@ -9,22 +9,30 @@ import SwiftUI
 import FirebaseAuth
 
 struct ContentView: View {
+    enum Route: Hashable {
+        case inbox
+        case chat(id: String)
+    }
+
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var auth = AuthService()
     private let store = FirestoreService()
     private let presence = PresenceService()
 
-    // NEW: keep the self convo without auto-opening it
+    // keep start-page state
     @State private var selfConversationId: String?
-    @State private var conversationId: String?   // when set, we navigate
+    @State private var conversationId: String?   // still used to open from “Test Chat”
     @State private var isLoading = true
     @State private var errorText: String?
     @State private var showUID = false
     @State private var showStartDM = false
-    @State private var showInbox = false
+
+    // NEW: single navigation path for the whole app
+    @State private var path: [Route] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
+            // ----- Home page content (unchanged UI) -----
             VStack(spacing: 16) {
                 Text("Hello, Concord 👋").font(.largeTitle).bold()
 
@@ -40,7 +48,8 @@ struct ContentView: View {
 
                 if let selfId = selfConversationId {
                     Button("Open Test Chat") {
-                        conversationId = selfId    // navigate now, not earlier
+                        // push Chat on the same stack
+                        path.append(.chat(id: selfId))
                     }
                     .buttonStyle(.borderedProminent)
                 } else if isLoading {
@@ -56,13 +65,10 @@ struct ContentView: View {
                         .buttonStyle(.bordered)
                 }
 
-                Button("Open Inbox") { showInbox = true }
-                    .buttonStyle(.borderedProminent)
-
-                .navigationDestination(isPresented: $showInbox) {
-                    ConversationListView()
+                Button("Open Inbox") {
+                    path.append(.inbox)   // push the list
                 }
-
+                .buttonStyle(.borderedProminent)
             }
             .padding()
             .toolbar {
@@ -71,10 +77,6 @@ struct ContentView: View {
                         Button("UID") { showUID = true }
                     }
                 }
-            }
-            // Navigate only when user sets conversationId
-            .navigationDestination(item: $conversationId) { convId in
-                ChatView(conversationId: convId)
             }
             .task {
                 await auth.signInAnonymouslyIfNeeded()
@@ -96,17 +98,31 @@ struct ContentView: View {
                     UIDSheet(uid: uid)
                 }
             }
-        }.sheet(isPresented: $showStartDM) {
-            if let uid = auth.uid {
-                StartDMView(myUid: uid) { other in
-                    Task {
-                        do {
-                            let convId = try await store.openOrCreateDM(me: uid, other: other)
-                            conversationId = convId
-                        } catch {
-                            errorText = error.localizedDescription
+            // If you still want the “Start DM” from Home, open and then push Chat:
+            .sheet(isPresented: $showStartDM) {
+                if let uid = auth.uid {
+                    StartDMView(myUid: uid) { other in
+                        Task {
+                            do {
+                                let convId = try await store.openOrCreateDM(me: uid, other: other)
+                                path.append(.chat(id: convId))
+                            } catch {
+                                errorText = error.localizedDescription
+                            }
                         }
                     }
+                }
+            }
+            // ----- The only navigationDestination in the app -----
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                case .inbox:
+                    ConversationListView { convId in
+                        path.append(.chat(id: convId)) // push chat from list
+                    }
+
+                case .chat(let id):
+                    ChatView(conversationId: id)
                 }
             }
         }
@@ -117,13 +133,12 @@ struct ContentView: View {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         do {
             let convId = try await store.createSelfConversationIfNeeded(uid: uid)
-            selfConversationId = convId     // <-- don't set conversationId here
+            selfConversationId = convId
         } catch { errorText = error.localizedDescription }
         isLoading = false
     }
 }
 
-// Simple sheet to copy the UID
 struct UIDSheet: View {
     let uid: String
     var body: some View {
@@ -144,11 +159,6 @@ struct UIDSheet: View {
             }
             .padding()
             .navigationTitle("My UID")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Close") { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
-                }
-            }
         }
     }
 }

@@ -22,6 +22,7 @@ struct ChatView: View {
 
     @State private var messages: [Message] = []
     @State private var text: String = ""
+    @State private var otherUserUID: String = "Loading..."
 
     // Pagination
     @State private var cursor: QueryDocumentSnapshot? = nil
@@ -77,14 +78,52 @@ struct ChatView: View {
             await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false)
         }
     }
-
+    
+    private func loadOtherUserUID(myUid: String) async {
+        let db = Firestore.firestore()
+        do {
+            let convSnap = try await db.collection("conversations").document(conversationId).getDocument()
+            guard let members = convSnap.data()?["members"] as? [String] else { return }
+            
+            // Find the other user (not me)
+            if let otherId = members.first(where: { $0 != myUid }) {
+                await MainActor.run {
+                    otherUserUID = otherId
+                }
+            } else {
+                await MainActor.run {
+                    otherUserUID = "Unknown"
+                }
+            }
+        } catch {
+            print("Error loading other user: \(error)")
+            await MainActor.run {
+                otherUserUID = "Error"
+            }
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
             // cap bubble width to ~72% of available width, up to 360pt
             let cap: CGFloat = min(geo.size.width * 0.72, 360)
             let rowWidth: CGFloat = geo.size.width
-            VStack {
+            VStack(spacing: 0) {
+                // Header with other user's UID
+                HStack {
+                    Spacer()
+                    Text(otherUserUID)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                }
+                .padding()
+                .background(Color(.systemBackground))
+                .overlay(
+                    Divider().frame(maxWidth: .infinity, maxHeight: 1),
+                    alignment: .bottom
+                )
+                
                 MessagesListView(
                     messages: messages,
                     cap: cap,
@@ -147,7 +186,10 @@ struct ChatView: View {
                     return
                 }
                 
-                // 2) Verify I'm a member of this conversation (optional but helpful for clear errors)
+                // 2) Load other user's UID
+                await loadOtherUserUID(myUid: uid)
+                
+                // 3) Verify I'm a member of this conversation (optional but helpful for clear errors)
                 let convRef = Firestore.firestore().collection("conversations").document(conversationId)
                 do {
                     let convSnap = try await convRef.getDocument()
@@ -160,7 +202,7 @@ struct ChatView: View {
                     // For MVP we'll just continue; the subcollection listeners will attach once readable.
                 }
                 
-                // 3) Attach messages listener
+                // 4) Attach messages listener
                 _ = store.listenMessages(conversationId: conversationId) { msgs in
                     DispatchQueue.main.async {
                         messages = msgs
@@ -176,7 +218,7 @@ struct ChatView: View {
                     }
                 }
                 
-                // 4) Attach typing listener
+                // 5) Attach typing listener
                 _ = store.listenTyping(conversationId: conversationId) { map in
                     DispatchQueue.main.async {
                         guard let me = Auth.auth().currentUser?.uid else { return }
@@ -195,7 +237,7 @@ struct ChatView: View {
                             typingHideTask = Task {
                                 try? await Task.sleep(nanoseconds: UInt64(typingInactivityGrace * 1_000_000_000))
                                 await MainActor.run {
-                                    // if we’ve seen a newer typing event, this task is obsolete
+                                    // if we've seen a newer typing event, this task is obsolete
                                     guard let last = typingLastSeenAt, Date().timeIntervalSince(last) >= typingInactivityGrace else { return }
 
                                     // honor the minimum visible time
