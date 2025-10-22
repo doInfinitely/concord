@@ -19,10 +19,11 @@ func waitForUID(timeoutSeconds: Double = 5.0) async -> String? {
 
 struct ChatView: View {
     let conversationId: String
-
+    
     @State private var messages: [Message] = []
     @State private var text: String = ""
     @State private var otherUserUID: String = "Loading..."
+    @State private var conversation: Conversation?
 
     // Pagination
     @State private var cursor: QueryDocumentSnapshot? = nil
@@ -79,6 +80,32 @@ struct ChatView: View {
         }
     }
     
+    private func loadConversation() async {
+        let db = Firestore.firestore()
+        do {
+            let convSnap = try await db.collection("conversations").document(conversationId).getDocument()
+            guard let data = convSnap.data() else { return }
+            
+            let members = data["members"] as? [String] ?? []
+            let name = data["name"] as? String
+            let lastMessageText = data["lastMessageText"] as? String
+            let lastMessageAt = (data["lastMessageAt"] as? Timestamp)?.dateValue()
+            
+            await MainActor.run {
+                conversation = Conversation(
+                    id: conversationId,
+                    members: members,
+                    memberCount: members.count,
+                    name: name,
+                    lastMessageText: lastMessageText,
+                    lastMessageAt: lastMessageAt
+                )
+            }
+        } catch {
+            print("Error loading conversation: \(error)")
+        }
+    }
+    
     private func loadOtherUserUID(myUid: String) async {
         let db = Firestore.firestore()
         do {
@@ -131,6 +158,7 @@ struct ChatView: View {
                     cursor: cursor,
                     loadingOlder: loadingOlder,
                     rowWidth: rowWidth,
+                    conversation: conversation,
                     loadOlder: {
                         Task {
                             loadingOlder = true
@@ -186,10 +214,13 @@ struct ChatView: View {
                     return
                 }
                 
-                // 2) Load other user's UID
+                // 2) Load conversation data (including member count)
+                await loadConversation()
+                
+                // 3) Load other user's UID
                 await loadOtherUserUID(myUid: uid)
                 
-                // 3) Verify I'm a member of this conversation (optional but helpful for clear errors)
+                // 4) Verify I'm a member of this conversation (optional but helpful for clear errors)
                 let convRef = Firestore.firestore().collection("conversations").document(conversationId)
                 do {
                     let convSnap = try await convRef.getDocument()
@@ -202,7 +233,7 @@ struct ChatView: View {
                     // For MVP we'll just continue; the subcollection listeners will attach once readable.
                 }
                 
-                // 4) Attach messages listener
+                // 5) Attach messages listener
                 _ = store.listenMessages(conversationId: conversationId) { msgs in
                     DispatchQueue.main.async {
                         messages = msgs
@@ -218,7 +249,7 @@ struct ChatView: View {
                     }
                 }
                 
-                // 5) Attach typing listener
+                // 6) Attach typing listener
                 _ = store.listenTyping(conversationId: conversationId) { map in
                     DispatchQueue.main.async {
                         guard let me = Auth.auth().currentUser?.uid else { return }
@@ -295,6 +326,7 @@ private struct MessagesListView: View {
     let cursor: QueryDocumentSnapshot?
     let loadingOlder: Bool
     let rowWidth: CGFloat
+    let conversation: Conversation?
     let loadOlder: () -> Void
 
     var body: some View {
@@ -312,12 +344,14 @@ private struct MessagesListView: View {
                         Divider()
                     }
 
+                    // In your ScrollView, update the MessageRow call:
                     ForEach(messages, id: \.id) { m in
                         MessageRow(
                             message: m,
                             isMe: (m.senderId == me),
                             cap: cap,
-                            rowWidth: rowWidth
+                            rowWidth: rowWidth,
+                            conversation: conversation
                         )
                     }
                 }
@@ -342,45 +376,82 @@ private struct MessageRow: View {
     let isMe: Bool
     let cap: CGFloat
     let rowWidth: CGFloat
+    let conversation: Conversation?
     
     @State private var bubbleWidth: CGFloat = 0
+    @State private var senderName: String?
 
     var body: some View {
         let paddingNeeded = isMe ? 12 - (cap - bubbleWidth) : 12
+        let isGroupChat = (conversation?.memberCount ?? 0) > 2
         
         HStack(spacing: 0) {
             if isMe { Spacer(minLength: 0) }
             
-            VStack(alignment: .leading, spacing: 4) {
-                Text(message.text)
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let t = message.createdAt {
-                    Text(t.formatted()).font(.caption).opacity(0.6)
+            VStack(alignment: isMe ? .trailing : .leading, spacing: 4) {
+                // Show sender name in group chats for other people's messages
+                if !isMe, isGroupChat {
+                    Text(senderName ?? shortUid(message.senderId))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
                 }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(message.text)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let t = message.createdAt {
+                        Text(t.formatted()).font(.caption).opacity(0.6)
+                    }
+                }
+                .padding(10)
+                .background(
+                    GeometryReader { geo in
+                        (isMe ? Color.clear : Color.gray.opacity(0.15))
+                            .onAppear {
+                                bubbleWidth = geo.size.width
+                            }
+                            .onChange(of: geo.size.width) { _, newWidth in
+                                bubbleWidth = newWidth
+                            }
+                    }
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(isMe ? Color.black : Color.clear, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .frame(maxWidth: cap, alignment: .leading)
             }
-            .padding(10)
-            .background(
-                GeometryReader { geo in
-                    (isMe ? Color.clear : Color.gray.opacity(0.15))
-                        .onAppear {
-                            bubbleWidth = geo.size.width
-                        }
-                        .onChange(of: geo.size.width) { _, newWidth in
-                            bubbleWidth = newWidth
-                        }
-                }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(isMe ? Color.black : Color.clear, lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .frame(maxWidth: cap, alignment: .leading)
             
             if !isMe { Spacer(minLength: 0) }
         }
         .padding(.horizontal, paddingNeeded)
         .id(message.id)
+        .task {
+            // Load sender name for group chats
+            if !isMe, isGroupChat {
+                await loadSenderName()
+            }
+        }
+    }
+    
+    private func loadSenderName() async {
+        do {
+            let db = Firestore.firestore()
+            let doc = try await db.collection("users").document(message.senderId).getDocument()
+            if let data = doc.data() {
+                await MainActor.run {
+                    senderName = data["displayName"] as? String ?? data["email"] as? String
+                }
+            }
+        } catch {
+            print("Error loading sender name: \(error)")
+        }
+    }
+    
+    private func shortUid(_ uid: String) -> String {
+        uid.count <= 8 ? uid : "\(uid.prefix(4))…\(uid.suffix(4))"
     }
 }
