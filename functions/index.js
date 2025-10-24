@@ -451,3 +451,171 @@ Return ONLY a valid JSON object (no markdown, no extra text):
         }
     }
 );
+
+// Proactive Assistant - Detects meeting proposals and checks for conflicts
+exports.proactiveAssistant = onDocumentCreated(
+    {
+        document: "conversations/{conversationId}/messages/{messageId}",
+        secrets: [openaiApiKey],
+    },
+    async (event) => {
+        const message = event.data.data();
+        const conversationId = event.params.conversationId;
+        const messageText = message.text;
+        const senderId = message.senderId;
+        
+        // Skip AI messages
+        if (message.isAI) {
+            return null;
+        }
+        
+        try {
+            const openai = new OpenAI({
+                apiKey: openaiApiKey.value(),
+            });
+            
+            // Ask AI if this message contains a meeting proposal
+            const detectMeetingCompletion = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                messages: [
+                    {
+                        role: "system",
+                        content: `You are a meeting detection assistant. Determine if a message contains a meeting proposal with a specific time. 
+                        Return ONLY a JSON object with these fields:
+                        - isMeetingProposal (boolean): true if the message proposes a meeting with a specific time
+                        - dateTime (string): ISO8601 date/time if found, null otherwise
+                        - duration (number): meeting duration in minutes (default 60)
+                        - title (string): brief meeting title
+                        
+                        Examples of meeting proposals:
+                        - "Let's meet at 2pm tomorrow"
+                        - "Can we schedule a call for 3:30pm on Thursday?"
+                        - "Meeting at 10am next Monday"
+                        
+                        NOT meeting proposals:
+                        - "Let's meet sometime"
+                        - "We should talk soon"
+                        - "Available this week?"`,
+                    },
+                    {
+                        role: "user",
+                        content: `Current time: ${new Date().toISOString()}\n\nMessage: "${messageText}"`,
+                    },
+                ],
+                response_format: {type: "json_object"},
+                temperature: 0.3,
+            });
+            
+            const detection = JSON.parse(detectMeetingCompletion.choices[0].message.content);
+            console.log("Meeting detection result:", detection);
+            
+            if (!detection.isMeetingProposal || !detection.dateTime) {
+                return null; // Not a meeting proposal
+            }
+            
+            // Get all conversation members except the sender
+            const conversationRef = admin.firestore()
+                .collection('conversations')
+                .doc(conversationId);
+            const conversationSnap = await conversationRef.get();
+            const members = conversationSnap.data()?.members || [];
+            const recipients = members.filter(uid => uid !== senderId);
+            
+            // For each recipient, check their calendar for conflicts
+            for (const userId of recipients) {
+                try {
+                    // Get user's calendar tokens
+                    const userDoc = await admin.firestore()
+                        .collection('users')
+                        .doc(userId)
+                        .get();
+                    const userData = userDoc.data() || {};
+                    
+                    // For now, we'll create a placeholder proactive message
+                    // In a full implementation, you'd call Google Calendar API here
+                    const hasConflict = false; // TODO: Actual conflict checking
+                    
+                    if (hasConflict) {
+                        // Send proactive AI message suggesting alternatives
+                        const aiMessageRef = conversationRef.collection('messages').doc();
+                        await aiMessageRef.set({
+                            senderId: 'ai_assistant',
+                            text: `⚠️ **Calendar Conflict Detected**\n\nThe proposed meeting time (${detection.dateTime}) conflicts with an existing event on your calendar.\n\n**Suggested alternatives:**\n- Option 1: [Alternative time 1]\n- Option 2: [Alternative time 2]\n- Option 3: [Alternative time 3]\n\nWould you like me to help reschedule?`,
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            status: 'sent',
+                            isAI: true,
+                            visibleTo: [userId],
+                            aiAction: 'proactive_conflict_detection',
+                            replyCount: 0,
+                        });
+                        
+                        console.log(`Sent proactive conflict warning to user ${userId}`);
+                    }
+                } catch (error) {
+                    console.error(`Error checking calendar for user ${userId}:`, error);
+                }
+            }
+            
+            return null;
+        } catch (error) {
+            console.error('Error in proactive assistant:', error);
+            return null; // Don't throw, just log
+        }
+    }
+);
+
+// Callable function to check conflicts and suggest times (called from iOS app)
+exports.checkConflictsAndSuggest = onCall(
+    {secrets: [openaiApiKey]},
+    async (request) => {
+        const {dateTime, duration, userId} = request.data;
+        
+        if (!userId || !dateTime) {
+            throw new Error("userId and dateTime are required");
+        }
+        
+        try {
+            // Get user's calendar tokens
+            const userDoc = await admin.firestore()
+                .collection('users')
+                .doc(userId)
+                .get();
+            const userData = userDoc.data() || {};
+            
+            const proposedDate = new Date(dateTime);
+            const durationMs = (duration || 60) * 60 * 1000; // Convert to milliseconds
+            
+            // TODO: Check Apple Calendar via user's device (requires callback)
+            // TODO: Check Google Calendar via API
+            const hasConflict = false; // Placeholder
+            const conflicts = []; // Placeholder
+            
+            if (!hasConflict) {
+                return {
+                    success: true,
+                    hasConflict: false,
+                    conflicts: [],
+                    suggestions: [],
+                };
+            }
+            
+            // Find alternative slots (placeholder logic)
+            const suggestions = [
+                new Date(proposedDate.getTime() + 3600000).toISOString(), // +1 hour
+                new Date(proposedDate.getTime() + 7200000).toISOString(), // +2 hours
+                new Date(proposedDate.getTime() + 10800000).toISOString(), // +3 hours
+            ];
+            
+            return {
+                success: true,
+                hasConflict: true,
+                conflicts: conflicts,
+                suggestions: suggestions,
+            };
+            
+        } catch (error) {
+            console.error('Error checking conflicts:', error);
+            throw new Error(`Conflict check error: ${error.message}`);
+        }
+    }
+);

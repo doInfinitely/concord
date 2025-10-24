@@ -374,6 +374,97 @@ struct ChatView: View {
             print("🔄 Read receipt updated via onChange to: \(Date())")
         }
     }
+    
+    private func checkForMeetingProposals(in newMessages: [Message]) async {
+        guard let uid = Auth.auth().currentUser?.uid else {
+            print("📅 Proactive: No uid")
+            return
+        }
+        
+        print("📅 Proactive: Checking \(newMessages.count) messages")
+        
+        for message in newMessages {
+            print("📅 Proactive: Message from \(message.senderId): '\(message.text.prefix(50))...'")
+            
+            // Skip AI messages
+            if message.isAI {
+                print("📅 Proactive: Skipping (AI message)")
+                continue
+            }
+            
+            // Check MY calendar for conflicts with ANY meeting proposal
+            // (doesn't matter who sent it - if there's a conflict, I should know)
+            
+            // Detect meeting proposal
+            let detection = calendarService.detectMeetingProposal(in: message.text)
+            print("📅 Proactive: Detection result: hasProposal=\(detection.hasProposal), date=\(detection.dateTime?.description ?? "nil")")
+            
+            guard detection.hasProposal, let proposedDate = detection.dateTime else {
+                continue
+            }
+            
+            print("📅 Detected meeting proposal at: \(proposedDate)")
+            print("📅 Proactive: Checking calendar for conflicts...")
+            
+            // Check for conflicts
+            do {
+                let result = try await calendarService.checkConflictsAndSuggestAlternatives(
+                    proposedDate: proposedDate,
+                    duration: detection.duration
+                )
+                
+                print("📅 Proactive: Conflict check complete. hasConflict=\(result.hasConflict), conflicts=\(result.conflicts.count)")
+                
+                if result.hasConflict {
+                    print("⚠️ Conflict detected! \(result.conflicts.count) conflicting events")
+                    
+                    // Format conflict message
+                    let dateFormatter = DateFormatter()
+                    dateFormatter.dateStyle = .medium
+                    dateFormatter.timeStyle = .short
+                    
+                    let conflictList = result.conflicts.map { event in
+                        "• \(event.title) (\(dateFormatter.string(from: event.startDate)))"
+                    }.joined(separator: "\n")
+                    
+                    var suggestionText = ""
+                    if !result.suggestions.isEmpty {
+                        suggestionText = "\n\n**Suggested alternatives:**\n"
+                        suggestionText += result.suggestions.enumerated().map { index, date in
+                            "• Option \(index + 1): \(dateFormatter.string(from: date))"
+                        }.joined(separator: "\n")
+                    }
+                    
+                    let aiMessage = """
+                    ⚠️ **Calendar Conflict Detected**
+                    
+                    The proposed meeting time (\(dateFormatter.string(from: proposedDate))) conflicts with:
+                    \(conflictList)\(suggestionText)
+                    
+                    Would you like to suggest an alternative time?
+                    """
+                    
+                    // Insert proactive AI message (visible only to current user)
+                    let db = Firestore.firestore()
+                    let aiMessageRef = db.collection("conversations").document(conversationId).collection("messages").document()
+                    try await aiMessageRef.setData([
+                        "senderId": "ai_assistant",
+                        "text": aiMessage,
+                        "createdAt": FieldValue.serverTimestamp(),
+                        "status": "sent",
+                        "isAI": true,
+                        "visibleTo": [uid],
+                        "aiAction": "proactive_conflict_detection",
+                        "replyCount": 0
+                    ])
+                    
+                    print("✅ Sent proactive conflict warning")
+                }
+            } catch {
+                print("❌ Error checking calendar conflicts: \(error)")
+            }
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -558,7 +649,19 @@ struct ChatView: View {
                 // 7) Attach messages listener
                 _ = store.listenMessages(conversationId: conversationId) { msgs in
                     DispatchQueue.main.async {
+                        let previousCount = messages.count
                         messages = msgs
+                        
+                        print("📨 Messages updated: prev=\(previousCount), new=\(msgs.count)")
+                        
+                        // Check for new messages with meeting proposals (proactive assistant)
+                        if msgs.count > previousCount {
+                            let newMessages = Array(msgs.suffix(msgs.count - previousCount))
+                            print("📨 Checking \(newMessages.count) new messages for meeting proposals")
+                            Task {
+                                await checkForMeetingProposals(in: newMessages)
+                            }
+                        }
                         
                         // Only update read receipt when view is active
                         guard isViewActive, !msgs.isEmpty else { return }

@@ -149,6 +149,252 @@ class CalendarService: ObservableObject {
         }
     }
     
+    /// Check for conflicts across ALL connected calendars
+    func checkConflictsAcrossAllCalendars(date: Date, duration: TimeInterval) async throws -> [CalendarEvent] {
+        var allConflicts: [CalendarEvent] = []
+        
+        print("📅 Conflict Check: isAppleConnected=\(isAppleCalendarConnected), date=\(date), duration=\(duration)s")
+        
+        // Check Apple Calendars
+        if isAppleCalendarConnected {
+            let calendars = eventStore.calendars(for: .event)
+            print("📅 Conflict Check: Found \(calendars.count) Apple calendars to check")
+            
+            let endDate = date.addingTimeInterval(duration)
+            let predicate = eventStore.predicateForEvents(
+                withStart: date,
+                end: endDate,
+                calendars: calendars
+            )
+            
+            let events = eventStore.events(matching: predicate)
+            print("📅 Conflict Check: Found \(events.count) events in time range")
+            
+            for event in events {
+                print("📅   - Event: '\(event.title)' at \(event.startDate)")
+            }
+            
+            let conflicts = events.map { event in
+                CalendarEvent(
+                    id: event.eventIdentifier,
+                    title: event.title,
+                    startDate: event.startDate,
+                    endDate: event.endDate,
+                    location: event.location,
+                    notes: event.notes,
+                    calendar: CalendarInfo(
+                        id: "apple_\(event.calendar.calendarIdentifier)",
+                        title: event.calendar.title,
+                        type: .apple,
+                        color: nil
+                    )
+                )
+            }
+            allConflicts.append(contentsOf: conflicts)
+        } else {
+            print("📅 Conflict Check: Apple Calendar not connected, skipping")
+        }
+        
+        // Check Google Calendars
+        if isGoogleCalendarConnected {
+            print("📅 Conflict Check: Checking Google Calendar...")
+            
+            guard let accessToken = GIDSignIn.sharedInstance.currentUser?.accessToken.tokenString else {
+                print("📅 Conflict Check: No Google access token, skipping")
+                return allConflicts
+            }
+            
+            // Fetch events from all Google calendars
+            let googleCalendars = availableCalendars.filter { $0.type == .google }
+            print("📅 Conflict Check: Found \(googleCalendars.count) Google calendars to check")
+            
+            for calendar in googleCalendars {
+                let calendarId = String(calendar.id.dropFirst(7)) // Remove "google_" prefix
+                
+                do {
+                    let events = try await fetchGoogleCalendarEvents(
+                        calendarId: calendarId,
+                        accessToken: accessToken,
+                        startDate: date,
+                        endDate: date.addingTimeInterval(duration)
+                    )
+                    
+                    print("📅 Conflict Check: Calendar '\(calendar.title)' has \(events.count) events in range")
+                    
+                    for event in events {
+                        print("📅   - Event: '\(event.title)' at \(event.startDate)")
+                    }
+                    
+                    allConflicts.append(contentsOf: events)
+                } catch {
+                    print("❌ Failed to fetch Google Calendar events for \(calendar.title): \(error)")
+                }
+            }
+        } else {
+            print("📅 Conflict Check: Google Calendar not connected, skipping")
+        }
+        
+        print("📅 Conflict Check: Total conflicts found: \(allConflicts.count)")
+        return allConflicts
+    }
+    
+    /// Find available time slots on a given day
+    func findAvailableSlots(
+        on date: Date,
+        duration: TimeInterval = 3600, // 1 hour default
+        workingHoursStart: Int = 9,    // 9 AM
+        workingHoursEnd: Int = 17,     // 5 PM
+        slotCount: Int = 3             // Return up to 3 suggestions
+    ) async throws -> [Date] {
+        var calendar = Calendar.current
+        calendar.timeZone = TimeZone.current
+        
+        // Get start of the day
+        let startOfDay = calendar.startOfDay(for: date)
+        
+        // Define working hours range
+        guard let workStart = calendar.date(bySettingHour: workingHoursStart, minute: 0, second: 0, of: startOfDay),
+              let workEnd = calendar.date(bySettingHour: workingHoursEnd, minute: 0, second: 0, of: startOfDay) else {
+            return []
+        }
+        
+        // Get all events for the day
+        let allEvents = try await checkConflictsAcrossAllCalendars(
+            date: workStart,
+            duration: workEnd.timeIntervalSince(workStart)
+        )
+        
+        // Sort events by start time
+        let sortedEvents = allEvents.sorted { $0.startDate < $1.startDate }
+        
+        var availableSlots: [Date] = []
+        var currentTime = workStart
+        
+        // Check each 30-minute slot
+        let slotIncrement: TimeInterval = 1800 // 30 minutes
+        
+        while currentTime < workEnd && availableSlots.count < slotCount {
+            let slotEnd = currentTime.addingTimeInterval(duration)
+            
+            // Check if this slot conflicts with any existing event
+            let hasConflict = sortedEvents.contains { event in
+                // Check if the proposed slot overlaps with this event
+                return (currentTime < event.endDate && slotEnd > event.startDate)
+            }
+            
+            if !hasConflict && slotEnd <= workEnd {
+                availableSlots.append(currentTime)
+            }
+            
+            currentTime = currentTime.addingTimeInterval(slotIncrement)
+        }
+        
+        return availableSlots
+    }
+    
+    /// Detect if a message contains a meeting proposal with time
+    func detectMeetingProposal(in text: String) -> (hasProposal: Bool, dateTime: Date?, duration: TimeInterval) {
+        let lowercased = text.lowercased()
+        
+        // Simple pattern matching for common meeting phrases
+        let meetingKeywords = ["meet", "meeting", "call", "lunch", "dinner", "coffee"]
+        let hasMeetingKeyword = meetingKeywords.contains { lowercased.contains($0) }
+        
+        if !hasMeetingKeyword {
+            return (false, nil, 3600)
+        }
+        
+        // Try to extract time using simple patterns
+        // This is a basic implementation - a full solution would use NLP
+        var detectedDate: Date?
+        
+        // Pattern: "at 3pm", "at 3:30pm", "at 15:00"
+        let timePatterns = [
+            #"at (\d{1,2}):?(\d{2})?\s*(am|pm)?"#,
+            #"(\d{1,2}):(\d{2})\s*(am|pm)?"#
+        ]
+        
+        for pattern in timePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) {
+                
+                let hourRange = match.range(at: 1)
+                if let hourString = Range(hourRange, in: text).map({ String(text[$0]) }),
+                   var hour = Int(hourString) {
+                    
+                    var minute = 0
+                    let minuteRange = match.range(at: 2)
+                    if minuteRange.location != NSNotFound,
+                       let minuteString = Range(minuteRange, in: text).map({ String(text[$0]) }) {
+                        minute = Int(minuteString) ?? 0
+                    }
+                    
+                    let ampmRange = match.range(at: 3)
+                    if ampmRange.location != NSNotFound,
+                       let ampm = Range(ampmRange, in: text).map({ String(text[$0]) }) {
+                        if ampm.lowercased() == "pm" && hour < 12 {
+                            hour += 12
+                        } else if ampm.lowercased() == "am" && hour == 12 {
+                            hour = 0
+                        }
+                    }
+                    
+                    // Create date for today at the extracted time in LOCAL timezone
+                    let calendar = Calendar.current
+                    let now = Date()
+                    
+                    // Get components for today in local time
+                    var components = calendar.dateComponents([.year, .month, .day], from: now)
+                    components.hour = hour
+                    components.minute = minute
+                    components.second = 0
+                    components.timeZone = TimeZone.current
+                    
+                    if let proposedDate = calendar.date(from: components) {
+                        print("📅 Detection: Extracted time: \(hour):\(minute) -> \(proposedDate)")
+                        // If the time has already passed today, assume tomorrow
+                        if proposedDate < now {
+                            detectedDate = calendar.date(byAdding: .day, value: 1, to: proposedDate)
+                            print("📅 Detection: Time passed, using tomorrow: \(detectedDate?.description ?? "nil")")
+                        } else {
+                            detectedDate = proposedDate
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        
+        return (detectedDate != nil, detectedDate, 3600) // Default 1 hour duration
+    }
+    
+    /// Check for conflicts and suggest alternatives
+    func checkConflictsAndSuggestAlternatives(
+        proposedDate: Date,
+        duration: TimeInterval
+    ) async throws -> (hasConflict: Bool, conflicts: [CalendarEvent], suggestions: [Date]) {
+        // Check for conflicts across all calendars
+        let conflicts = try await checkConflictsAcrossAllCalendars(
+            date: proposedDate,
+            duration: duration
+        )
+        
+        if conflicts.isEmpty {
+            return (false, [], [])
+        }
+        
+        // Find alternative time slots on the same day
+        let suggestions = try await findAvailableSlots(
+            on: proposedDate,
+            duration: duration,
+            workingHoursStart: 9,
+            workingHoursEnd: 17,
+            slotCount: 3
+        )
+        
+        return (true, conflicts, suggestions)
+    }
+    
     /// Create event in Apple Calendar
     func createAppleCalendarEvent(
         calendarId: String,
@@ -278,6 +524,74 @@ class CalendarService: ObservableObject {
         }
         
         try await saveCalendarStatus(apple: nil, google: true)
+    }
+    
+    /// Fetch Google Calendar events in a time range
+    private func fetchGoogleCalendarEvents(
+        calendarId: String,
+        accessToken: String,
+        startDate: Date,
+        endDate: Date
+    ) async throws -> [CalendarEvent] {
+        // Format dates for Google Calendar API (RFC3339)
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone.current
+        let timeMin = formatter.string(from: startDate)
+        let timeMax = formatter.string(from: endDate)
+        
+        // Build URL with query parameters
+        let urlString = "https://www.googleapis.com/calendar/v3/calendars/\(calendarId)/events?timeMin=\(timeMin)&timeMax=\(timeMax)&singleEvents=true&orderBy=startTime"
+        guard let encodedUrlString = urlString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: encodedUrlString) else {
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
+        }
+        
+        if httpResponse.statusCode != 200 {
+            if let errorString = String(data: data, encoding: .utf8) {
+                print("❌ Google Calendar API error: \(errorString)")
+            }
+            throw NSError(domain: "CalendarService", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Failed to fetch events"])
+        }
+        
+        let decoder = JSONDecoder()
+        let eventsResponse = try decoder.decode(GoogleCalendarEventsResponse.self, from: data)
+        
+        // Convert to CalendarEvent objects
+        let dateParser = ISO8601DateFormatter()
+        return eventsResponse.items.compactMap { item in
+            guard let startString = item.start.dateTime ?? item.start.date,
+                  let startDate = dateParser.date(from: startString) else {
+                return nil
+            }
+            
+            let endString = item.end.dateTime ?? item.end.date
+            let endDate = endString.flatMap { dateParser.date(from: $0) } ?? startDate.addingTimeInterval(3600)
+            
+            return CalendarEvent(
+                id: item.id,
+                title: item.summary ?? "(No title)",
+                startDate: startDate,
+                endDate: endDate,
+                location: item.location,
+                notes: item.description,
+                calendar: CalendarInfo(
+                    id: "google_\(calendarId)",
+                    title: "", // We don't have the calendar title here
+                    type: .google,
+                    color: nil
+                )
+            )
+        }
     }
     
     /// Fetch Google Calendar list
@@ -594,5 +908,24 @@ struct GoogleCalendarAttendee: Codable {
 struct GoogleCalendarEventResponse: Codable {
     let id: String
     let htmlLink: String
+}
+
+struct GoogleCalendarEventsResponse: Codable {
+    let items: [GoogleCalendarEventItem]
+}
+
+struct GoogleCalendarEventItem: Codable {
+    let id: String
+    let summary: String?
+    let description: String?
+    let location: String?
+    let start: GoogleCalendarEventDateTime
+    let end: GoogleCalendarEventDateTime
+}
+
+struct GoogleCalendarEventDateTime: Codable {
+    let dateTime: String?
+    let date: String?
+    let timeZone: String?
 }
 
