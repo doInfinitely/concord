@@ -267,6 +267,11 @@ class CalendarService: ObservableObject {
         // Sort events by start time
         let sortedEvents = allEvents.sorted { $0.startDate < $1.startDate }
         
+        print("📅 Finding available slots: \(sortedEvents.count) events on this day")
+        for event in sortedEvents {
+            print("📅   Busy: \(event.startDate) - \(event.endDate) (\(event.title))")
+        }
+        
         var availableSlots: [Date] = []
         var currentTime = workStart
         
@@ -284,10 +289,13 @@ class CalendarService: ObservableObject {
             
             if !hasConflict && slotEnd <= workEnd {
                 availableSlots.append(currentTime)
+                print("📅   ✅ Free slot found: \(currentTime)")
             }
             
             currentTime = currentTime.addingTimeInterval(slotIncrement)
         }
+        
+        print("📅 Total free slots found: \(availableSlots.count)")
         
         return availableSlots
     }

@@ -291,7 +291,7 @@ private struct ThreadMessageBubble: View {
                     }
                     
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(message.text)
+                        Text(parseMarkdown(message.text))
                             .foregroundStyle(.primary)
                             .fixedSize(horizontal: false, vertical: true)
                         
@@ -443,7 +443,7 @@ private struct AIThreadMessageBubble: View {
                             .tint(.white)
                             .padding(8)
                     } else {
-                        Text(message.text)
+                        Text(parseMarkdown(message.text))
                             .foregroundStyle(.white)
                             .fixedSize(horizontal: false, vertical: true)
                         
@@ -464,6 +464,16 @@ private struct AIThreadMessageBubble: View {
             Spacer()
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Markdown Parsing Helper
+private func parseMarkdown(_ text: String) -> AttributedString {
+    do {
+        return try AttributedString(markdown: text, options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+    } catch {
+        // If markdown parsing fails, return plain text
+        return AttributedString(text)
     }
 }
 

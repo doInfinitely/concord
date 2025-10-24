@@ -436,12 +436,10 @@ struct ChatView: View {
                     }
                     
                     let aiMessage = """
-                    ⚠️ **Calendar Conflict Detected**
+                    **Calendar Conflict Detected**
                     
-                    The proposed meeting time (\(dateFormatter.string(from: proposedDate))) conflicts with:
+                    The proposed meeting time **\(dateFormatter.string(from: proposedDate))** conflicts with:
                     \(conflictList)\(suggestionText)
-                    
-                    Would you like to suggest an alternative time?
                     """
                     
                     // Insert proactive AI message (visible only to current user)
@@ -940,7 +938,7 @@ private struct MessageRow: View {
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(message.text)
+                    Text(parseMarkdown(message.text))
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let t = message.createdAt {
@@ -1130,6 +1128,16 @@ private struct TypingDotsView: View {
     }
 }
 
+// MARK: - Markdown Parsing Helper
+private func parseMarkdown(_ text: String) -> AttributedString {
+    do {
+        return try AttributedString(markdown: text, options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+    } catch {
+        // If markdown parsing fails, return plain text
+        return AttributedString(text)
+    }
+}
+
 // MARK: - Wave Text Animation
 private struct WaveText: View {
     let text: String
@@ -1174,7 +1182,7 @@ private struct AIMessageBubble: View {
                             .tint(.white)
                             .padding(8)
                     } else {
-                        Text(message.text)
+                        Text(parseMarkdown(message.text))
                             .foregroundStyle(.white)
                             .fixedSize(horizontal: false, vertical: true)
                         
