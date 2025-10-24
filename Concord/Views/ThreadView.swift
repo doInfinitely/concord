@@ -86,7 +86,9 @@ struct ThreadOverlayView: View {
                                 aiLoadingForMessage: aiLoadingForMessage,
                                 onAIAction: { message, action in
                                     handleAIAction(message: message, action: action)
-                                }
+                                },
+                                showCreateEvent: $showCreateEvent,
+                                extractedEvent: $extractedEvent
                             )
                             
                             // Show replies
@@ -102,7 +104,9 @@ struct ThreadOverlayView: View {
                                     aiLoadingForMessage: aiLoadingForMessage,
                                     onAIAction: { message, action in
                                         handleAIAction(message: message, action: action)
-                                    }
+                                    },
+                                    showCreateEvent: $showCreateEvent,
+                                    extractedEvent: $extractedEvent
                                 )
                             }
                         }
@@ -257,13 +261,20 @@ private struct ThreadMessageBubble: View {
     let isLastMessage: Bool
     let aiLoadingForMessage: String?
     let onAIAction: (Message, AIAction) -> Void
+    @Binding var showCreateEvent: Bool
+    @Binding var extractedEvent: ExtractedEventData
     
     @State private var senderName: String?
     
     var body: some View {
         // AI messages render as black bubbles
         if message.isAI {
-            return AnyView(AIThreadMessageBubble(message: message, aiLoadingForMessage: aiLoadingForMessage))
+            return AnyView(AIThreadMessageBubble(
+                message: message,
+                aiLoadingForMessage: aiLoadingForMessage,
+                showCreateEvent: $showCreateEvent,
+                extractedEvent: $extractedEvent
+            ))
         }
         
         return AnyView(regularThreadBubble)
@@ -420,9 +431,54 @@ private struct ThreadMessageBubble: View {
 private struct AIThreadMessageBubble: View {
     let message: Message
     let aiLoadingForMessage: String?
+    @Binding var showCreateEvent: Bool
+    @Binding var extractedEvent: ExtractedEventData
     
     var isLoading: Bool {
         aiLoadingForMessage == message.id
+    }
+    
+    private func handleSuggestionTap(date: Date, originalMessage: String) {
+        // Extract event details from the original conflict message
+        var eventData = ExtractedEventData()
+        eventData.date = date
+        eventData.duration = 3600 // Default 1 hour
+        
+        // Try to extract title from the conflict message
+        // The message contains info about what meeting was proposed
+        if let titleRange = originalMessage.range(of: "proposed meeting") {
+            eventData.title = "Meeting"
+        } else {
+            eventData.title = "Event"
+        }
+        
+        extractedEvent = eventData
+        showCreateEvent = true
+    }
+    
+    private func parseSuggestedTimes(from text: String) -> [(Int, String, Date)] {
+        var results: [(Int, String, Date)] = []
+        
+        // Match patterns like "• Option 1: Oct 24, 2025 at 4:00 PM"
+        let lines = text.components(separatedBy: "\n")
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        dateFormatter.timeStyle = .short
+        
+        for (index, line) in lines.enumerated() {
+            // Extract the date string after "Option X: "
+            if let colonRange = line.range(of: ":") {
+                let dateString = String(line[colonRange.upperBound...])
+                    .trimmingCharacters(in: .whitespaces)
+                
+                // Try to parse the date
+                if let parsedDate = dateFormatter.date(from: dateString) {
+                    results.append((index, dateString, parsedDate))
+                }
+            }
+        }
+        
+        return results
     }
     
     var body: some View {
@@ -473,13 +529,21 @@ private struct AIThreadMessageBubble: View {
                                     .fontWeight(.bold)
                                     .padding(.top, 4)
                                 
-                                // Text after suggestions (the list)
+                                // Parse and display interactive suggestions
                                 let afterText = String(bodyText[range.upperBound...])
                                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                                if !afterText.isEmpty {
-                                    Text(parseMarkdown(afterText))
-                                        .foregroundStyle(.white)
-                                        .fixedSize(horizontal: false, vertical: true)
+                                
+                                ForEach(parseSuggestedTimes(from: afterText), id: \.0) { index, dateString, parsedDate in
+                                    Button {
+                                        handleSuggestionTap(date: parsedDate, originalMessage: message.text)
+                                    } label: {
+                                        Text("• Option \(index + 1): \(dateString)")
+                                            .foregroundStyle(.white)
+                                            .underline()
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             } else {
                                 // No suggestions, just show the body text
