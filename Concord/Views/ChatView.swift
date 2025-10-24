@@ -730,9 +730,8 @@ private struct MessageRow: View {
                     Button {
                         onReply()
                     } label: {
-                        Text(message.replyCount == 1 ? "1 Reply" : "\(message.replyCount) Replies")
+                        WaveText(text: message.replyCount == 1 ? "1 Reply" : "\(message.replyCount) Replies")
                             .font(.caption)
-                            .foregroundStyle(.blue)
                             .padding(.top, 2)
                     }
                     .frame(maxWidth: cap, alignment: isMe ? .trailing : .leading)
@@ -841,6 +840,23 @@ private struct TypingDotsView: View {
         }
         .onAppear {
             animating = true
+        }
+    }
+}
+
+// MARK: - Wave Text Animation
+private struct WaveText: View {
+    let text: String
+    
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            HStack(spacing: 0) {
+                ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+                    Text(String(character))
+                        .offset(y: sin((timeline.date.timeIntervalSinceReferenceDate * 2) + Double(index) * 0.67) * 2)
+                }
+            }
+            .foregroundStyle(.black)
         }
     }
 }
