@@ -1089,6 +1089,7 @@ private struct MessageRow: View {
             if !isMe { Spacer(minLength: 0) }
         }
         .padding(.horizontal, paddingNeeded)
+        .padding(.leading, isMe ? 0 : 12)  // Add 12pt padding for other person's messages
         .id(message.id)
         .task {
             // Load sender name for group chats
@@ -1451,5 +1452,6 @@ private struct AIMessageBubble: View {
             Spacer()
         }
         .padding(.vertical, 4)
+        .padding(.leading, 6)  // Add 6pt padding for AI messages
     }
 }

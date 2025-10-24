@@ -30,15 +30,16 @@ struct ThreadOverlayView: View {
     @StateObject private var calendarService = CalendarService()
     
     var body: some View {
-        ZStack {
-            // iMessage-style translucent white overlay covering whole screen
-            Color.white.opacity(0.85)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    isPresented = false
-                }
-            
-            VStack(spacing: 0) {
+        GeometryReader { geometry in
+            ZStack {
+                // iMessage-style translucent white overlay covering whole screen
+                Color.white.opacity(0.85)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        isPresented = false
+                    }
+                
+                VStack(spacing: 0) {
                 // Header with close button
                 HStack {
                     Spacer()
@@ -133,9 +134,17 @@ struct ThreadOverlayView: View {
                 .background(Color(.systemBackground))
             }
             .background(Color(.systemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .shadow(radius: 20)
-            .padding(40)
+            .clipShape(RoundedRectangle(cornerRadius: 0))
+            .shadow(radius: 0)
+            .padding(.horizontal, 0)
+            .padding(.vertical, 0)
+                
+                // Physics thread on the left side (on top of everything)
+                HStack(spacing: 0) {
+                    PhysicsThreadView(height: geometry.size.height)
+                    Spacer()
+                }
+            }
         }
         .transition(.opacity.combined(with: .scale(scale: 0.95)))
         .task {
@@ -370,6 +379,7 @@ private struct ThreadMessageBubble: View {
                 
                 if !isMe { Spacer(minLength: 40) }
             }
+            .padding(.leading, isMe ? 0 : 12)  // Add 12pt padding for other person's messages
         }
         .task {
             if !isMe {
@@ -587,6 +597,7 @@ private struct AIThreadMessageBubble: View {
             Spacer()
         }
         .padding(.vertical, 4)
+        .padding(.leading, 6)  // Add 6pt padding for AI messages
     }
 }
 
