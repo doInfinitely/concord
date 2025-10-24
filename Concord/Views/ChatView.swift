@@ -509,34 +509,173 @@ struct ChatView: View {
             let cap: CGFloat = min(geo.size.width * 0.72, 360)
             let rowWidth: CGFloat = geo.size.width
             VStack(spacing: 0) {
-                // Header with chat title
-                HStack {
-                    Spacer()
+                // Header with chat title and net simulation
+                ZStack {
+                    // Net simulation background
+                    NetSimulationView(width: geo.size.width, height: 60)
                     
-                    if isEditingTitle {
-                        TextField("Group Name", text: $editableTitleText, onCommit: {
-                            saveGroupName()
-                        })
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.center)
-                        .textFieldStyle(.plain)
-                        .submitLabel(.done)
-                    } else {
-                        Text(chatTitle)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
+                    // Header content
+                    HStack {
+                        Spacer()
+                        
+                        if isEditingTitle {
+                            ZStack {
+                                // White stroke/bezel layer (thicker)
+                                // Diagonal offsets
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: -2, y: -2)
+                                
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: 2, y: -2)
+                                
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: -2, y: 2)
+                                
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: 2, y: 2)
+                                
+                                // Cardinal direction offsets
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: 0, y: -2)
+                                
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: 0, y: 2)
+                                
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: -2, y: 0)
+                                
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                                .offset(x: 2, y: 0)
+                                
+                                // Main text on top
+                                TextField("Group Name", text: $editableTitleText, onCommit: {
+                                    saveGroupName()
+                                })
+                                .font(.headline)
+                                .foregroundStyle(.gray)
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .submitLabel(.done)
+                            }
+                        } else {
+                            ZStack {
+                                // White stroke/bezel layer (thicker)
+                                // Diagonal offsets
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: -2, y: -2)
+                                
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: 2, y: -2)
+                                
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: -2, y: 2)
+                                
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: 2, y: 2)
+                                
+                                // Cardinal direction offsets
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: 0, y: -2)
+                                
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: 0, y: 2)
+                                
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: -2, y: 0)
+                                
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .offset(x: 2, y: 0)
+                                
+                                // Main text on top
+                                Text(chatTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(.gray)
+                            }
                             .onTapGesture {
                                 if let convo = conversation, convo.memberCount > 2 {
                                     editableTitleText = chatTitle
                                     isEditingTitle = true
                                 }
                             }
+                        }
+                        
+                        Spacer()
                     }
-                    
-                    Spacer()
+                    .padding()
                 }
-                .padding()
+                .frame(height: 60)
                 .background(Color(.systemBackground))
                 .overlay(
                     Divider().frame(maxWidth: .infinity, maxHeight: 1),
