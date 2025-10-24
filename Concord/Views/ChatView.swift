@@ -32,6 +32,7 @@ struct ChatView: View {
     @State private var messages: [Message] = []
     @State private var text: String = ""
     @State private var otherUserUID: String = "Loading..."
+    @State private var chatTitle: String = "Loading..."
     @State private var conversation: Conversation?
 
     // Pagination
@@ -149,6 +150,50 @@ struct ChatView: View {
         }
     }
     
+    private func loadChatTitle(myUid: String) async {
+        guard let convo = conversation else { return }
+        
+        // For group chats, use the group name
+        if convo.memberCount > 2 {
+            await MainActor.run {
+                chatTitle = convo.name ?? "Group Chat"
+            }
+            return
+        }
+        
+        // For DMs, load the other user's display name
+        let db = Firestore.firestore()
+        do {
+            if let otherId = convo.members.first(where: { $0 != myUid }) {
+                let userSnap = try await db.collection("users").document(otherId).getDocument()
+                if let data = userSnap.data() {
+                    let displayName = data["displayName"] as? String
+                    let email = data["email"] as? String
+                    await MainActor.run {
+                        chatTitle = displayName ?? email ?? shortUid(otherId)
+                    }
+                } else {
+                    await MainActor.run {
+                        chatTitle = shortUid(otherId)
+                    }
+                }
+            } else {
+                await MainActor.run {
+                    chatTitle = "Unknown"
+                }
+            }
+        } catch {
+            print("Error loading chat title: \(error)")
+            await MainActor.run {
+                chatTitle = shortUid(otherUserUID)
+            }
+        }
+    }
+    
+    private func shortUid(_ uid: String) -> String {
+        uid.count <= 8 ? uid : "\(uid.prefix(4))…\(uid.suffix(4))"
+    }
+    
     private func attachReadReceiptsListener() {
         rrListener?.remove()
         let rrRef = Firestore.firestore()
@@ -188,10 +233,10 @@ struct ChatView: View {
             let cap: CGFloat = min(geo.size.width * 0.72, 360)
             let rowWidth: CGFloat = geo.size.width
             VStack(spacing: 0) {
-                // Header with other user's UID
+                // Header with chat title
                 HStack {
                     Spacer()
-                    Text(otherUserUID)
+                    Text(chatTitle)
                         .font(.headline)
                         .foregroundStyle(.primary)
                     Spacer()
@@ -287,7 +332,10 @@ struct ChatView: View {
                 // 3) Load other user's UID
                 await loadOtherUserUID(myUid: uid)
                 
-                // 4) Verify I'm a member of this conversation (optional but helpful for clear errors)
+                // 4) Load chat title (name for groups, display name for DMs)
+                await loadChatTitle(myUid: uid)
+                
+                // 5) Verify I'm a member of this conversation (optional but helpful for clear errors)
                 let convRef = Firestore.firestore().collection("conversations").document(conversationId)
                 do {
                     let convSnap = try await convRef.getDocument()
@@ -300,7 +348,7 @@ struct ChatView: View {
                     // For MVP we'll just continue; the subcollection listeners will attach once readable.
                 }
                 
-                // 5) Attach messages listener
+                // 6) Attach messages listener
                 _ = store.listenMessages(conversationId: conversationId) { msgs in
                     DispatchQueue.main.async {
                         messages = msgs
@@ -319,7 +367,7 @@ struct ChatView: View {
                     }
                 }
                 
-                // 6) Attach read receipts listener
+                // 7) Attach read receipts listener
                 attachReadReceiptsListener()
                 
                 // FIX: Wait for initial messages to load, then immediately update read receipt
@@ -335,7 +383,7 @@ struct ChatView: View {
                     }
                 }
                 
-                // 7) Attach typing listener (recency-aware to avoid stale 'true')
+                // 8) Attach typing listener (recency-aware to avoid stale 'true')
                 let typingRef = Firestore.firestore()
                     .collection("conversations").document(conversationId)
                     .collection("typing")

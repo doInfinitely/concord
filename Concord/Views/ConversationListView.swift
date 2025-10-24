@@ -158,6 +158,7 @@ private struct ConversationRow: View {
     @State private var unread: Int? = nil
     @State private var online = false
     @State private var presenceListener: ListenerRegistration?
+    @State private var otherUserDisplayName: String?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -223,6 +224,27 @@ private struct ConversationRow: View {
         .onAppear {
             if convo.memberCount == 2, let me = myUid,
                let other = convo.members.first(where: { $0 != me }) {
+                // Load other user's display name
+                Task {
+                    do {
+                        let userSnap = try await Firestore.firestore()
+                            .collection("users")
+                            .document(other)
+                            .getDocument()
+                        
+                        if let data = userSnap.data() {
+                            let displayName = data["displayName"] as? String
+                            let email = data["email"] as? String
+                            await MainActor.run {
+                                otherUserDisplayName = displayName ?? email ?? shortUid(other)
+                            }
+                        }
+                    } catch {
+                        print("Error loading user display name: \(error)")
+                    }
+                }
+                
+                // Set up presence listener
                 presenceListener = Firestore.firestore()
                     .collection("users").document(other)
                     .addSnapshotListener { snap, _ in
@@ -247,9 +269,15 @@ private struct ConversationRow: View {
         if let name = convo.name, !name.isEmpty {
             return name
         }
-        if convo.memberCount == 2, let me = myUid,
-           let other = convo.members.first(where: { $0 != me }) {
-            return "DM with \(shortUid(other))"
+        if convo.memberCount == 2 {
+            // Use loaded display name if available, otherwise show loading or UID
+            if let displayName = otherUserDisplayName {
+                return displayName
+            }
+            // Still loading or no display name found
+            if let me = myUid, let other = convo.members.first(where: { $0 != me }) {
+                return shortUid(other)
+            }
         }
         return "Group Chat"
     }
@@ -258,9 +286,19 @@ private struct ConversationRow: View {
         if let name = convo.name, !name.isEmpty {
             return String(name.prefix(2)).uppercased()
         }
-        if convo.memberCount == 2, let me = myUid,
-           let other = convo.members.first(where: { $0 != me }) {
-            return String(shortUid(other).prefix(2)).uppercased()
+        if convo.memberCount == 2 {
+            // Use loaded display name if available
+            if let displayName = otherUserDisplayName {
+                let components = displayName.components(separatedBy: " ")
+                if components.count >= 2 {
+                    return "\(components[0].prefix(1))\(components[1].prefix(1))".uppercased()
+                }
+                return String(displayName.prefix(2)).uppercased()
+            }
+            // Still loading or no display name
+            if let me = myUid, let other = convo.members.first(where: { $0 != me }) {
+                return String(shortUid(other).prefix(2)).uppercased()
+            }
         }
         return "G"
     }
@@ -286,15 +324,55 @@ private struct ProfileView: View {
     @EnvironmentObject var auth: AuthService
     @Environment(\.dismiss) private var dismiss
     @State private var showCopiedAlert = false
+    @State private var isEditingName = false
+    @State private var displayName = ""
+    @State private var isSavingName = false
+    @State private var saveError: String?
     
     var body: some View {
         NavigationStack {
             Form {
                 Section("Account") {
                     if let user = auth.user {
-                        if let displayName = user.displayName {
-                            LabeledContent("Name", value: displayName)
+                        // Editable Display Name
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Name")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                
+                                if isEditingName {
+                                    TextField("Display Name", text: $displayName)
+                                        .textInputAutocapitalization(.words)
+                                } else {
+                                    Text(user.displayName ?? "Not set")
+                                        .font(.body)
+                                }
+                            }
+                            
+                            Spacer()
+                            
+                            if isEditingName {
+                                if isSavingName {
+                                    ProgressView()
+                                } else {
+                                    Button("Save") {
+                                        saveName()
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }
+                            } else {
+                                Button {
+                                    displayName = user.displayName ?? ""
+                                    isEditingName = true
+                                } label: {
+                                    Text("Edit")
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
+                        
                         if let email = user.email {
                             LabeledContent("Email", value: email)
                         }
@@ -336,8 +414,13 @@ private struct ProfileView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") {
-                        dismiss()
+                    Button(isEditingName ? "Cancel" : "Done") {
+                        if isEditingName {
+                            isEditingName = false
+                            saveError = nil
+                        } else {
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -345,6 +428,47 @@ private struct ProfileView: View {
                 Button("OK", role: .cancel) { }
             } message: {
                 Text("Your UID has been copied to the clipboard")
+            }
+            .alert("Error", isPresented: .constant(saveError != nil)) {
+                Button("OK") { saveError = nil }
+            } message: {
+                if let error = saveError {
+                    Text(error)
+                }
+            }
+        }
+    }
+    
+    private func saveName() {
+        guard let user = auth.user else { return }
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        
+        isSavingName = true
+        Task {
+            do {
+                // Update Firebase Auth profile
+                let changeRequest = user.createProfileChangeRequest()
+                changeRequest.displayName = trimmed
+                try await changeRequest.commitChanges()
+                
+                // Update Firestore user document
+                try await Firestore.firestore()
+                    .collection("users")
+                    .document(user.uid)
+                    .setData(["displayName": trimmed], merge: true)
+                
+                await MainActor.run {
+                    isSavingName = false
+                    isEditingName = false
+                    // Trigger auth refresh to update UI
+                    auth.user = Auth.auth().currentUser
+                }
+            } catch {
+                await MainActor.run {
+                    isSavingName = false
+                    saveError = error.localizedDescription
+                }
             }
         }
     }
