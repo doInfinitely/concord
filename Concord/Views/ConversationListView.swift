@@ -165,18 +165,16 @@ private struct ConversationRow: View {
             // Avatar
             ZStack(alignment: .bottomTrailing) {
                 Circle()
+                    .fill(.gray.opacity(0.15))
                     .frame(width: 50, height: 50)
-                    .opacity(0.15)
                     .overlay(
                         Text(avatarInitials)
                             .font(.headline)
                             .bold()
+                            .foregroundStyle(.black)
                     )
                 if online && convo.memberCount == 2 {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 12, height: 12)
-                        .overlay(Circle().stroke(.white, lineWidth: 2))
+                    AnimatedPresenceDot()
                         .offset(x: 4, y: 4)
                 }
             }
@@ -185,18 +183,19 @@ private struct ConversationRow: View {
                 HStack {
                     Text(title)
                         .font(.headline)
+                        .foregroundStyle(.black)
                         .lineLimit(1)
                     
                     if convo.memberCount > 2 {
                         Text("(\(convo.memberCount))")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.gray)
                     }
                 }
                 
                 Text(convo.lastMessageText ?? "No messages yet")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.gray)
                     .lineLimit(1)
             }
 
@@ -206,14 +205,14 @@ private struct ConversationRow: View {
                 if let t = convo.lastMessageAt {
                     Text(relativeDate(t))
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.gray)
                 }
                 if let u = unread, u > 0 {
                     Text("\(u)")
                         .font(.caption2)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(.blue)
+                        .background(.black)
                         .foregroundStyle(.white)
                         .clipShape(Capsule())
                 }
@@ -784,6 +783,131 @@ struct CreateEventView: View {
                     errorMessage = error.localizedDescription
                 }
             }
+        }
+    }
+}
+
+// MARK: - Animated Presence Dot
+private struct AnimatedPresenceDot: View {
+    @State private var dashOffsets: [Double] = Array(repeating: 0.0, count: 8)
+    @State private var angleWiggles: [Double] = Array(repeating: 0.0, count: 8)
+    
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            ZStack {
+                // Radiating lines with animated dashes
+                ForEach(0..<8) { i in
+                    let progress = dashOffsets[i]
+                    let angleWiggle = angleWiggles[i]
+                    
+                    ZStack {
+                        // Black background ray with gradient to white at tip
+                        LinearGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: .black, location: 0.0),
+                                .init(color: .black, location: 0.5),
+                                .init(color: .white, location: 1.0)
+                            ]),
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(width: 2, height: 8)
+                        .offset(y: -10)
+                        
+                        // White dash traveling outward (always rendered, opacity controls visibility)
+                        Rectangle()
+                            .fill(.white)
+                            .frame(width: 2, height: 3)
+                            .offset(y: -6 - (progress * 8))
+                            .opacity(progress < 1.0 ? 1.0 : 0.0)
+                    }
+                    .rotationEffect(.degrees(Double(i) * 45 + angleWiggle))
+                }
+                
+                // White circle with black border
+                Circle()
+                    .fill(.white)
+                    .frame(width: 12, height: 12)
+                
+                Circle()
+                    .stroke(.black, lineWidth: 2)
+                    .frame(width: 12, height: 12)
+            }
+            .onAppear {
+                // Initialize with random offsets
+                dashOffsets = (0..<8).map { _ in Double.random(in: 0...1) }
+                angleWiggles = (0..<8).map { _ in Double.random(in: -5...5) }
+                startAnimations()
+                startWiggleAnimations()
+            }
+        }
+    }
+    
+    private func startAnimations() {
+        // Animate each dash independently with random delays
+        for i in 0..<8 {
+            let randomDelay = Double.random(in: 0...2)
+            
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(randomDelay * 1_000_000_000))
+                await animateDash(index: i)
+            }
+        }
+    }
+    
+    private func startWiggleAnimations() {
+        // Animate each ray's angle independently
+        for i in 0..<8 {
+            Task {
+                await animateWiggle(index: i)
+            }
+        }
+    }
+    
+    @MainActor
+    private func animateDash(index: Int) async {
+        while true {
+            let startTime = Date()
+            let duration: TimeInterval = 0.6
+            
+            // Smoothly increment progress over duration
+            while Date().timeIntervalSince(startTime) < duration {
+                let elapsed = Date().timeIntervalSince(startTime)
+                dashOffsets[index] = min(elapsed / duration, 1.0)
+                try? await Task.sleep(nanoseconds: 16_000_000) // ~60fps update
+            }
+            
+            dashOffsets[index] = 1.0
+            try? await Task.sleep(nanoseconds: 100_000_000) // Brief pause at end
+            
+            // Reset and wait random time before next dash
+            dashOffsets[index] = 0.0
+            let randomWait = Double.random(in: 0.5...2.0)
+            try? await Task.sleep(nanoseconds: UInt64(randomWait * 1_000_000_000))
+        }
+    }
+    
+    @MainActor
+    private func animateWiggle(index: Int) async {
+        while true {
+            // Random target angle wiggle between -5 and +5 degrees
+            let targetWiggle = Double.random(in: -5...5)
+            let startWiggle = angleWiggles[index]
+            let startTime = Date()
+            let duration: TimeInterval = Double.random(in: 0.3...0.8) // Random duration for organic motion
+            
+            // Smoothly interpolate to target angle
+            while Date().timeIntervalSince(startTime) < duration {
+                let elapsed = Date().timeIntervalSince(startTime)
+                let progress = min(elapsed / duration, 1.0)
+                angleWiggles[index] = startWiggle + (targetWiggle - startWiggle) * progress
+                try? await Task.sleep(nanoseconds: 16_000_000) // ~60fps update
+            }
+            
+            angleWiggles[index] = targetWiggle
+            
+            // Brief pause before next wiggle
+            try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 0.1...0.3) * 1_000_000_000))
         }
     }
 }
