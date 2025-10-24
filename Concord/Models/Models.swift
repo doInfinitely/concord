@@ -17,9 +17,8 @@ struct Conversation: Identifiable, Hashable {
     var lastMessageText: String?
     var lastMessageAt: Date?
 
-    // Hash/Equatable by id
-    func hash(into hasher: inout Hasher) { hasher.combine(id) }
-    static func == (lhs: Conversation, rhs: Conversation) -> Bool { lhs.id == rhs.id }
+    // Use automatic Hashable/Equatable synthesis
+    // This compares all fields, not just id, so SwiftUI detects changes properly
 }
 
 struct Message: Identifiable {

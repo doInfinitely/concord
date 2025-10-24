@@ -137,6 +137,10 @@ struct ConversationListView: View {
         .task {
             guard let uid = auth.uid else { return }
             _ = store.listenConversations(for: uid) { items in
+                print("🔄 ConversationListView received \(items.count) conversations")
+                items.forEach { conv in
+                    print("  - \(conv.id): \(conv.name ?? "no name")")
+                }
                 conversations = items
             }
         }

@@ -34,6 +34,8 @@ struct ChatView: View {
     @State private var otherUserUID: String = "Loading..."
     @State private var chatTitle: String = "Loading..."
     @State private var conversation: Conversation?
+    @State private var isEditingTitle: Bool = false
+    @State private var editableTitleText: String = ""
 
     // Pagination
     @State private var cursor: QueryDocumentSnapshot? = nil
@@ -43,6 +45,7 @@ struct ChatView: View {
     @State private var receiptTask: Task<Void, Never>? = nil
     @State private var readReceipts: [String: Date] = [:]
     @State private var rrListener: ListenerRegistration?
+    @State private var conversationListener: ListenerRegistration?
     @State private var isViewActive = false // Track if view is actively being displayed
 
     // Typing indicator
@@ -126,6 +129,40 @@ struct ChatView: View {
         }
     }
     
+    private func attachConversationListener() {
+        conversationListener?.remove()
+        let db = Firestore.firestore()
+        
+        conversationListener = db.collection("conversations")
+            .document(conversationId)
+            .addSnapshotListener { snapshot, error in
+                guard let data = snapshot?.data() else { return }
+                
+                let members = data["members"] as? [String] ?? []
+                let name = data["name"] as? String
+                let lastMessageText = data["lastMessageText"] as? String
+                let lastMessageAt = (data["lastMessageAt"] as? Timestamp)?.dateValue()
+                
+                DispatchQueue.main.async {
+                    self.conversation = Conversation(
+                        id: self.conversationId,
+                        members: members,
+                        memberCount: members.count,
+                        name: name,
+                        lastMessageText: lastMessageText,
+                        lastMessageAt: lastMessageAt
+                    )
+                    
+                    // Update chat title if it changed (for group chats)
+                    if let uid = Auth.auth().currentUser?.uid {
+                        if members.count > 2 {
+                            self.chatTitle = name ?? "Group Chat"
+                        }
+                    }
+                }
+            }
+    }
+    
     private func loadOtherUserUID(myUid: String) async {
         let db = Firestore.firestore()
         do {
@@ -194,6 +231,45 @@ struct ChatView: View {
         uid.count <= 8 ? uid : "\(uid.prefix(4))…\(uid.suffix(4))"
     }
     
+    private func saveGroupName() {
+        let trimmed = editableTitleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            isEditingTitle = false
+            return
+        }
+        
+        Task {
+            do {
+                // Update Firestore conversation name
+                // Also update lastMessageAt to trigger the query listener in ConversationListView
+                let db = Firestore.firestore()
+                try await db.collection("conversations")
+                    .document(conversationId)
+                    .setData([
+                        "name": trimmed,
+                        "lastMessageAt": FieldValue.serverTimestamp()
+                    ], merge: true)
+                
+                print("✅ Group name updated to: \(trimmed)")
+                
+                await MainActor.run {
+                    chatTitle = trimmed
+                    isEditingTitle = false
+                    // Update local conversation object
+                    if var convo = conversation {
+                        convo.name = trimmed
+                        conversation = convo
+                    }
+                }
+            } catch {
+                print("❌ Error updating group name: \(error)")
+                await MainActor.run {
+                    isEditingTitle = false
+                }
+            }
+        }
+    }
+    
     private func attachReadReceiptsListener() {
         rrListener?.remove()
         let rrRef = Firestore.firestore()
@@ -236,9 +312,28 @@ struct ChatView: View {
                 // Header with chat title
                 HStack {
                     Spacer()
-                    Text(chatTitle)
+                    
+                    if isEditingTitle {
+                        TextField("Group Name", text: $editableTitleText, onCommit: {
+                            saveGroupName()
+                        })
                         .font(.headline)
                         .foregroundStyle(.primary)
+                        .multilineTextAlignment(.center)
+                        .textFieldStyle(.plain)
+                        .submitLabel(.done)
+                    } else {
+                        Text(chatTitle)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .onTapGesture {
+                                if let convo = conversation, convo.memberCount > 2 {
+                                    editableTitleText = chatTitle
+                                    isEditingTitle = true
+                                }
+                            }
+                    }
+                    
                     Spacer()
                 }
                 .padding()
@@ -329,13 +424,16 @@ struct ChatView: View {
                 // 2) Load conversation data (including member count)
                 await loadConversation()
                 
-                // 3) Load other user's UID
+                // 3) Attach real-time listener for conversation updates (name changes, etc.)
+                attachConversationListener()
+                
+                // 4) Load other user's UID
                 await loadOtherUserUID(myUid: uid)
                 
-                // 4) Load chat title (name for groups, display name for DMs)
+                // 5) Load chat title (name for groups, display name for DMs)
                 await loadChatTitle(myUid: uid)
                 
-                // 5) Verify I'm a member of this conversation (optional but helpful for clear errors)
+                // 6) Verify I'm a member of this conversation (optional but helpful for clear errors)
                 let convRef = Firestore.firestore().collection("conversations").document(conversationId)
                 do {
                     let convSnap = try await convRef.getDocument()
@@ -348,7 +446,7 @@ struct ChatView: View {
                     // For MVP we'll just continue; the subcollection listeners will attach once readable.
                 }
                 
-                // 6) Attach messages listener
+                // 7) Attach messages listener
                 _ = store.listenMessages(conversationId: conversationId) { msgs in
                     DispatchQueue.main.async {
                         messages = msgs
@@ -367,7 +465,7 @@ struct ChatView: View {
                     }
                 }
                 
-                // 7) Attach read receipts listener
+                // 8) Attach read receipts listener
                 attachReadReceiptsListener()
                 
                 // FIX: Wait for initial messages to load, then immediately update read receipt
@@ -383,7 +481,7 @@ struct ChatView: View {
                     }
                 }
                 
-                // 8) Attach typing listener (recency-aware to avoid stale 'true')
+                // 9) Attach typing listener (recency-aware to avoid stale 'true')
                 let typingRef = Firestore.firestore()
                     .collection("conversations").document(conversationId)
                     .collection("typing")
@@ -455,10 +553,14 @@ struct ChatView: View {
                     Task { await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false) }
                 }
 
-                // add these two lines for read receipts cleanup
+                // read receipts cleanup
                 rrListener?.remove()
                 rrListener = nil
                 receiptTask?.cancel()
+                
+                // conversation listener cleanup
+                conversationListener?.remove()
+                conversationListener = nil
             }
         }
     }

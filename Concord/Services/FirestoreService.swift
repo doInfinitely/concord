@@ -160,15 +160,18 @@ final class FirestoreService {
             guard let docs = snap?.documents else { return }
             let items: [Conversation] = docs.map { doc in
                 let d = doc.data()
+                let name = d["name"] as? String
+                print("📱 Conversation \(doc.documentID): name = \(name ?? "nil")")
                 return Conversation(
                     id: doc.documentID,
                     members: (d["members"] as? [String]) ?? [],
                     memberCount: (d["memberCount"] as? Int) ?? 0,
-                    name: d["name"] as? String,
+                    name: name,
                     lastMessageText: d["lastMessageText"] as? String,
                     lastMessageAt: (d["lastMessageAt"] as? Timestamp)?.dateValue()
                 )
             }
+            print("📱 Conversations list updated: \(items.count) conversations")
             onChange(items)
         }
     }
