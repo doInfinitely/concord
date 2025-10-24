@@ -234,51 +234,91 @@ exports.aiService = onCall(
                 .collection('conversations')
                 .doc(conversationId);
             
-            let messagesQuery;
+            let messages = [];
+            
             if (threadId) {
-                // Get thread messages
-                messagesQuery = conversationRef
+                // For threads, we need to get BOTH the root message AND all replies
+                // The root message doesn't have threadId set, so we fetch it separately
+                
+                // 1. Get the root message
+                const rootMessageDoc = await conversationRef
+                    .collection('messages')
+                    .doc(threadId)
+                    .get();
+                
+                if (rootMessageDoc.exists) {
+                    const rootData = rootMessageDoc.data();
+                    const senderSnap = await admin.firestore()
+                        .collection('users')
+                        .doc(rootData.senderId)
+                        .get();
+                    const senderData = senderSnap.data() || {};
+                    const senderName = senderData.displayName || senderData.email || 'Unknown';
+                    
+                    messages.push({
+                        sender: senderName,
+                        text: rootData.text,
+                        timestamp: rootData.createdAt?.toDate?.()?.toISOString() || 'Unknown time'
+                    });
+                }
+                
+                // 2. Get all replies in the thread
+                const threadMessagesQuery = conversationRef
                     .collection('messages')
                     .where('threadId', '==', threadId)
                     .orderBy('createdAt', 'asc')
                     .limit(100);
+                
+                const threadSnapshot = await threadMessagesQuery.get();
+                
+                for (const doc of threadSnapshot.docs) {
+                    const msgData = doc.data();
+                    const senderSnap = await admin.firestore()
+                        .collection('users')
+                        .doc(msgData.senderId)
+                        .get();
+                    const senderData = senderSnap.data() || {};
+                    const senderName = senderData.displayName || senderData.email || 'Unknown';
+                    
+                    messages.push({
+                        sender: senderName,
+                        text: msgData.text,
+                        timestamp: msgData.createdAt?.toDate?.()?.toISOString() || 'Unknown time'
+                    });
+                }
             } else {
                 // Get recent conversation messages
-                messagesQuery = conversationRef
+                const messagesQuery = conversationRef
                     .collection('messages')
                     .orderBy('createdAt', 'desc')
                     .limit(50);
-            }
-            
-            const messagesSnapshot = await messagesQuery.get();
-            const messages = [];
-            
-            // Fetch sender names and build message context
-            for (const doc of messagesSnapshot.docs) {
-                const msgData = doc.data();
-                const senderSnap = await admin.firestore()
-                    .collection('users')
-                    .doc(msgData.senderId)
-                    .get();
-                const senderData = senderSnap.data() || {};
-                const senderName = senderData.displayName || senderData.email || 'Unknown';
                 
-                messages.push({
-                    sender: senderName,
-                    text: msgData.text,
-                    timestamp: msgData.createdAt?.toDate?.()?.toISOString() || 'Unknown time'
-                });
-            }
-            
-            // Reverse if we got thread messages (they're in correct order already)
-            if (!threadId) {
-                messages.reverse();
+                const messagesSnapshot = await messagesQuery.get();
+                const docs = messagesSnapshot.docs.reverse(); // Reverse to chronological order
+                
+                for (const doc of docs) {
+                    const msgData = doc.data();
+                    const senderSnap = await admin.firestore()
+                        .collection('users')
+                        .doc(msgData.senderId)
+                        .get();
+                    const senderData = senderSnap.data() || {};
+                    const senderName = senderData.displayName || senderData.email || 'Unknown';
+                    
+                    messages.push({
+                        sender: senderName,
+                        text: msgData.text,
+                        timestamp: msgData.createdAt?.toDate?.()?.toISOString() || 'Unknown time'
+                    });
+                }
             }
             
             // Build context string
             const conversationContext = messages.map(m => 
                 `${m.sender} (${m.timestamp}): ${m.text}`
             ).join('\n');
+            
+            console.log(`🤖 AI Context for ${action}:\n${conversationContext}`);
             
             let systemPrompt = "";
             let userPrompt = "";
@@ -305,10 +345,51 @@ exports.aiService = onCall(
                     userPrompt = `Summarize the decisions made in this conversation:\n\n${conversationContext}`;
                     break;
                     
-                case "extract_event":
-                    systemPrompt = "You are a helpful assistant that extracts calendar events from messages. Return JSON with: title, date, time, location, attendees.";
+                case "extract_event": {
+                    const now = new Date();
+                    const currentDate = now.toISOString();
+                    
+                    // Get current day info in UTC (where Cloud Function runs)
+                    const dayOfWeekNum = now.getUTCDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
+                    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+                    const dayOfWeek = dayNames[dayOfWeekNum];
+                    const dateStr = `${monthNames[now.getUTCMonth()]} ${now.getUTCDate()}, ${now.getUTCFullYear()}`;
+                    
+                    // Calculate what "next Thursday" means from today
+                    const daysUntilNextThursday = dayOfWeekNum <= 4 ? (4 - dayOfWeekNum + 7) : (11 - dayOfWeekNum);
+                    const nextThursday = new Date(now);
+                    nextThursday.setUTCDate(now.getUTCDate() + daysUntilNextThursday);
+                    const nextThursdayStr = `${monthNames[nextThursday.getUTCMonth()]} ${nextThursday.getUTCDate()}`;
+                    
+                    systemPrompt = `You are a helpful assistant that extracts calendar events from messages. 
+
+TODAY'S INFO (UTC):
+- Current date: ${dateStr} (${dayOfWeek})
+- ISO timestamp: ${currentDate}
+
+IMPORTANT DATE PARSING RULES:
+- If someone says "next Thursday" today (${dayOfWeek} ${dateStr}), that means ${nextThursdayStr}
+- "this Thursday" = the upcoming Thursday of this current week (if we haven't passed Thursday yet)
+- "next Thursday" = the Thursday of next week
+- Calculate dates carefully by counting forward from today
+
+Read the ENTIRE conversation to find the final agreed meeting time. If the time changed during the conversation, use the FINAL agreed time.
+
+CRITICAL: For the date field, use ISO8601 format but WITHOUT timezone conversion. If someone says "1pm", return the date with 13:00 in the local time context (use 'T13:00:00' in the ISO string). Do NOT convert to UTC. The client app will handle timezone.
+
+Return ONLY a valid JSON object (no markdown, no extra text):
+{
+  "title": "string",
+  "date": "ISO8601 string without timezone offset (e.g., '2025-10-30T13:00:00')",
+  "durationMinutes": 60,
+  "location": "string or null",
+  "attendees": ["array", "of", "strings"],
+  "notes": "string or null"
+}`;
                     userPrompt = `Extract calendar event details from this conversation:\n\n${conversationContext}`;
                     break;
+                }
                     
                 case "track_rsvps":
                     systemPrompt = "You are a helpful assistant that tracks RSVPs and responses to questions. List who responded, what they said, and who hasn't responded yet.";
@@ -331,6 +412,16 @@ exports.aiService = onCall(
             });
             
             const aiResponse = completion.choices[0].message.content;
+            
+            // For calendar events, don't store as a message - return JSON directly
+            if (action === "extract_event") {
+                console.log(`Calendar event extracted for user: ${userId}`);
+                return {
+                    success: true,
+                    response: aiResponse,
+                    messageId: null // No message created for calendar events
+                };
+            }
             
             // Store AI response as a message visible only to requesting user
             const aiMessageRef = conversationRef.collection('messages').doc();

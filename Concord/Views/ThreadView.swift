@@ -22,9 +22,12 @@ struct ThreadOverlayView: View {
     @State private var isLoading = true
     @State private var threadListener: ListenerRegistration?
     @State private var aiLoadingForMessage: String? = nil
+    @State private var showCreateEvent = false
+    @State private var extractedEvent = ExtractedEventData()
     
     private let store = FirestoreService()
     private let aiService = AIService()
+    @StateObject private var calendarService = CalendarService()
     
     var body: some View {
         ZStack {
@@ -142,11 +145,20 @@ struct ThreadOverlayView: View {
                     self.isLoading = false
                 }
             }
+            
+            // Load calendar status for event creation
+            await calendarService.loadCalendarStatus()
         }
         .onDisappear {
             // Clean up listener when view disappears
             threadListener?.remove()
             threadListener = nil
+        }
+        .sheet(isPresented: $showCreateEvent) {
+            CreateEventView(
+                calendarService: calendarService,
+                eventData: $extractedEvent
+            )
         }
     }
     
@@ -180,7 +192,21 @@ struct ThreadOverlayView: View {
                     aiLoadingForMessage = nil
                 }
                 
-                // The AI response will appear via the real-time listener
+                // Special handling for calendar event extraction
+                if action == .extractEvent {
+                    print("📅 [ThreadView] Parsing calendar event from AI response")
+                    // Parse the AI response and show the event creation sheet
+                    let parsedEvent = calendarService.parseEventData(from: response)
+                    print("📅 [ThreadView] Parsed event: title=\(parsedEvent.title), date=\(parsedEvent.date?.description ?? "nil")")
+                    print("📅 [ThreadView] Available calendars: \(calendarService.availableCalendars.count)")
+                    
+                    await MainActor.run {
+                        extractedEvent = parsedEvent
+                        showCreateEvent = true
+                        print("📅 [ThreadView] Showing create event sheet: \(showCreateEvent)")
+                    }
+                }
+                // For other actions, the AI response will appear via the real-time listener
                 
             } catch {
                 print("❌ AI action error: \(error.localizedDescription)")

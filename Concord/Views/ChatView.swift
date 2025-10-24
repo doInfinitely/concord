@@ -61,6 +61,11 @@ struct ChatView: View {
     // AI Service
     @State private var aiLoadingForMessage: String? = nil // Message ID currently processing AI
     private let aiService = AIService()
+    
+    // Calendar Event Creation
+    @State private var showCreateEvent = false
+    @State private var extractedEvent = ExtractedEventData()
+    @StateObject private var calendarService = CalendarService()
 
     private let typingInactivityGrace: TimeInterval = 0.05  // wait this long after last event
     private let typingMinVisible: TimeInterval = 0.9       // ensure UI stays visible at least this long
@@ -311,7 +316,21 @@ struct ChatView: View {
                     aiLoadingForMessage = nil
                 }
                 
-                // The AI response is automatically added to Firestore by the Cloud Function
+                // Special handling for calendar event extraction
+                if action == .extractEvent {
+                    print("📅 Parsing calendar event from AI response")
+                    // Parse the AI response and show the event creation sheet
+                    let parsedEvent = calendarService.parseEventData(from: response)
+                    print("📅 Parsed event: title=\(parsedEvent.title), date=\(parsedEvent.date?.description ?? "nil")")
+                    print("📅 Available calendars: \(calendarService.availableCalendars.count)")
+                    
+                    await MainActor.run {
+                        extractedEvent = parsedEvent
+                        showCreateEvent = true
+                        print("📅 Showing create event sheet: \(showCreateEvent)")
+                    }
+                }
+                // For other actions, the AI response is automatically added to Firestore
                 // and will appear via the real-time listener
                 
             } catch {
@@ -542,7 +561,10 @@ struct ChatView: View {
                     }
                 }
                 
-                // 9) Attach typing listener (recency-aware to avoid stale 'true')
+                // 9) Load calendar status for event creation
+                await calendarService.loadCalendarStatus()
+                
+                // 10) Attach typing listener (recency-aware to avoid stale 'true')
                 let typingRef = Firestore.firestore()
                     .collection("conversations").document(conversationId)
                     .collection("typing")
@@ -614,6 +636,12 @@ struct ChatView: View {
                         readReceiptsMap: readReceipts
                     )
                 }
+            }
+            .sheet(isPresented: $showCreateEvent) {
+                CreateEventView(
+                    calendarService: calendarService,
+                    eventData: $extractedEvent
+                )
             }
             .onDisappear {
                 // Mark view as inactive

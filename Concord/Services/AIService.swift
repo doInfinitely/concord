@@ -44,8 +44,7 @@ class AIService {
             guard let resultData = result.data as? [String: Any],
                   let success = resultData["success"] as? Bool,
                   success,
-                  let response = resultData["response"] as? String,
-                  let messageId = resultData["messageId"] as? String else {
+                  let response = resultData["response"] as? String else {
                 
                 // Check if there's an error message in the response
                 if let resultData = result.data as? [String: Any],
@@ -64,6 +63,9 @@ class AIService {
                     userInfo: [NSLocalizedDescriptionKey: "Invalid response from AI service: \(result.data)"]
                 )
             }
+            
+            // messageId is optional (null for calendar events)
+            let messageId = resultData["messageId"] as? String ?? ""
             
             return (response, messageId)
         } catch let error as NSError {

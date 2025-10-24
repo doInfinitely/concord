@@ -328,6 +328,7 @@ private struct ProfileView: View {
     @State private var displayName = ""
     @State private var isSavingName = false
     @State private var saveError: String?
+    @StateObject private var calendarService = CalendarService()
     
     var body: some View {
         NavigationStack {
@@ -401,6 +402,76 @@ private struct ProfileView: View {
                             .buttonStyle(.bordered)
                         }
                     }
+                }
+                
+                Section("Calendars") {
+                    // Apple Calendar
+                    HStack {
+                        Label("Apple Calendar", systemImage: "calendar")
+                        Spacer()
+                        if calendarService.isAppleCalendarConnected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Button("Disconnect") {
+                                Task {
+                                    do {
+                                        try await calendarService.disconnectAppleCalendar()
+                                    } catch {
+                                        print("❌ Error disconnecting Apple Calendar: \(error)")
+                                    }
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                        } else {
+                            Button("Connect") {
+                                Task {
+                                    do {
+                                        let granted = try await calendarService.requestAppleCalendarAccess()
+                                        if !granted {
+                                            print("⚠️ Calendar access denied")
+                                        }
+                                    } catch {
+                                        print("❌ Error requesting calendar access: \(error)")
+                                    }
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                    
+                    // Google Calendar
+                    HStack {
+                        Label("Google Calendar", systemImage: "calendar.badge.clock")
+                        Spacer()
+                        if calendarService.isGoogleCalendarConnected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Button("Disconnect") {
+                                Task {
+                                    do {
+                                        try await calendarService.disconnectGoogleCalendar()
+                                    } catch {
+                                        print("❌ Error disconnecting Google Calendar: \(error)")
+                                    }
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                        } else {
+                            Button("Connect") {
+                                Task {
+                                    do {
+                                        try await calendarService.connectGoogleCalendar()
+                                    } catch {
+                                        print("❌ Error connecting Google Calendar: \(error)")
+                                    }
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
+                .task {
+                    await calendarService.loadCalendarStatus()
                 }
                 
                 Section {
@@ -502,6 +573,210 @@ private struct StartDMView: View {
                 }
             }
             .navigationTitle("Start DM")
+        }
+    }
+}
+
+// MARK: - Create Event View
+struct CreateEventView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var calendarService: CalendarService
+    @Binding var eventData: ExtractedEventData
+    
+    @State private var selectedCalendar: CalendarInfo?
+    @State private var conflicts: [CalendarEvent] = []
+    @State private var isCheckingConflicts = false
+    @State private var isCreatingEvent = false
+    @State private var showSuccess = false
+    @State private var errorMessage: String?
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Event Details") {
+                    TextField("Title", text: $eventData.title)
+                    
+                    DatePicker("Date & Time", selection: Binding(
+                        get: { eventData.date ?? Date() },
+                        set: { eventData.date = $0 }
+                    ))
+                    
+                    HStack {
+                        Text("Duration")
+                        Spacer()
+                        Picker("Duration", selection: $eventData.duration) {
+                            Text("15 min").tag(TimeInterval(900))
+                            Text("30 min").tag(TimeInterval(1800))
+                            Text("1 hour").tag(TimeInterval(3600))
+                            Text("2 hours").tag(TimeInterval(7200))
+                            Text("3 hours").tag(TimeInterval(10800))
+                        }
+                        .pickerStyle(.menu)
+                    }
+                    
+                    TextField("Location", text: Binding(
+                        get: { eventData.location ?? "" },
+                        set: { eventData.location = $0.isEmpty ? nil : $0 }
+                    ))
+                    
+                    TextField("Notes", text: Binding(
+                        get: { eventData.notes ?? "" },
+                        set: { eventData.notes = $0.isEmpty ? nil : $0 }
+                    ), axis: .vertical)
+                    .lineLimit(3...6)
+                }
+                
+                Section("Calendar") {
+                    Picker("Select Calendar", selection: $selectedCalendar) {
+                        Text("Choose...").tag(nil as CalendarInfo?)
+                        ForEach(calendarService.availableCalendars) { calendar in
+                            HStack {
+                                Image(systemName: calendar.type == .apple ? "calendar" : "calendar.badge.clock")
+                                Text(calendar.title)
+                            }
+                            .tag(calendar as CalendarInfo?)
+                        }
+                    }
+                }
+                
+                if isCheckingConflicts {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text("Checking for conflicts...")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else if !conflicts.isEmpty {
+                    Section {
+                        Label("Scheduling Conflicts", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        
+                        ForEach(conflicts) { conflict in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(conflict.title)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                Text("\(conflict.startDate.formatted(date: .omitted, time: .shortened)) - \(conflict.endDate.formatted(date: .omitted, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Create Event")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") {
+                        createEvent()
+                    }
+                    .disabled(eventData.title.isEmpty || eventData.date == nil || selectedCalendar == nil || isCreatingEvent)
+                }
+            }
+            .task {
+                // Select first available calendar by default
+                if selectedCalendar == nil, let first = calendarService.availableCalendars.first {
+                    selectedCalendar = first
+                }
+                
+                // Check for conflicts
+                await checkConflicts()
+            }
+            .onChange(of: eventData.date) { _, _ in
+                Task {
+                    await checkConflicts()
+                }
+            }
+            .onChange(of: selectedCalendar) { _, _ in
+                Task {
+                    await checkConflicts()
+                }
+            }
+            .alert("Event Created", isPresented: $showSuccess) {
+                Button("OK") {
+                    dismiss()
+                }
+            } message: {
+                Text("Your event has been added to your calendar.")
+            }
+            .alert("Error", isPresented: .constant(errorMessage != nil)) {
+                Button("OK") {
+                    errorMessage = nil
+                }
+            } message: {
+                if let error = errorMessage {
+                    Text(error)
+                }
+            }
+        }
+    }
+    
+    private func checkConflicts() async {
+        guard let date = eventData.date,
+              let calendar = selectedCalendar else {
+            return
+        }
+        
+        isCheckingConflicts = true
+        
+        do {
+            conflicts = try await calendarService.checkConflicts(
+                date: date,
+                duration: eventData.duration,
+                calendarId: calendar.id
+            )
+        } catch {
+            print("❌ Error checking conflicts: \(error)")
+        }
+        
+        await MainActor.run {
+            isCheckingConflicts = false
+        }
+    }
+    
+    private func createEvent() {
+        guard let date = eventData.date,
+              let calendar = selectedCalendar else {
+            return
+        }
+        
+        isCreatingEvent = true
+        
+        Task {
+            do {
+                if calendar.type == .apple {
+                    _ = try await calendarService.createAppleCalendarEvent(
+                        calendarId: calendar.id,
+                        title: eventData.title,
+                        startDate: date,
+                        duration: eventData.duration,
+                        location: eventData.location,
+                        notes: eventData.notes,
+                        attendees: eventData.attendees
+                    )
+                } else {
+                    // Google Calendar creation would go here
+                    print("🔵 Google Calendar event creation not yet implemented")
+                }
+                
+                await MainActor.run {
+                    isCreatingEvent = false
+                    showSuccess = true
+                }
+            } catch {
+                await MainActor.run {
+                    isCreatingEvent = false
+                    errorMessage = error.localizedDescription
+                }
+            }
         }
     }
 }

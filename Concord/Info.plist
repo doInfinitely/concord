@@ -15,6 +15,10 @@
 	</array>
 	<key>GIDClientID</key>
 	<string>206741784883-7aqceq1rn3ppgffnj4snf90ujk1mflgu.apps.googleusercontent.com</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Concord needs access to your calendar to add events extracted from messages and check for scheduling conflicts.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Concord needs full access to your calendar to create events and check for scheduling conflicts.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
