@@ -21,8 +21,10 @@ struct ThreadOverlayView: View {
     @State private var replyText: String = ""
     @State private var isLoading = true
     @State private var threadListener: ListenerRegistration?
+    @State private var aiLoadingForMessage: String? = nil
     
     private let store = FirestoreService()
+    private let aiService = AIService()
     
     var body: some View {
         ZStack {
@@ -62,6 +64,14 @@ struct ThreadOverlayView: View {
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
+                            // Filter visible messages (AI messages might be user-specific)
+                            let visibleMessages = threadMessages.filter { msg in
+                                guard msg.isAI else { return true }
+                                guard let visibleTo = msg.visibleTo else { return true }
+                                guard let myUid = Auth.auth().currentUser?.uid else { return false }
+                                return visibleTo.contains(myUid)
+                            }
+                            
                             // Always show the root message first
                             ThreadMessageBubble(
                                 message: rootMessage,
@@ -69,20 +79,28 @@ struct ThreadOverlayView: View {
                                 isRootMessage: true,
                                 conversation: conversation,
                                 readReceiptsMap: readReceiptsMap,
-                                isLastMessage: threadMessages.count == 1
+                                isLastMessage: visibleMessages.count == 1,
+                                aiLoadingForMessage: aiLoadingForMessage,
+                                onAIAction: { message, action in
+                                    handleAIAction(message: message, action: action)
+                                }
                             )
                             
                             // Show replies if any
-                            if threadMessages.count > 1 {
-                                ForEach(Array(threadMessages.dropFirst().enumerated()), id: \.element.id) { index, message in
-                                    let isLast = index == threadMessages.count - 2 // -2 because we dropped first
+                            if visibleMessages.count > 1 {
+                                ForEach(Array(visibleMessages.dropFirst().enumerated()), id: \.element.id) { index, message in
+                                    let isLast = index == visibleMessages.count - 2 // -2 because we dropped first
                                     ThreadMessageBubble(
                                         message: message,
                                         isMe: message.senderId == Auth.auth().currentUser?.uid,
                                         isRootMessage: false,
                                         conversation: conversation,
                                         readReceiptsMap: readReceiptsMap,
-                                        isLastMessage: isLast && message.senderId == Auth.auth().currentUser?.uid
+                                        isLastMessage: isLast && message.senderId == Auth.auth().currentUser?.uid,
+                                        aiLoadingForMessage: aiLoadingForMessage,
+                                        onAIAction: { message, action in
+                                            handleAIAction(message: message, action: action)
+                                        }
                                     )
                                 }
                             }
@@ -132,6 +150,47 @@ struct ThreadOverlayView: View {
         }
     }
     
+    private func handleAIAction(message: Message, action: AIAction) {
+        guard let userId = Auth.auth().currentUser?.uid else {
+            print("❌ No user ID for AI action")
+            return
+        }
+        
+        Task {
+            do {
+                // Set loading state
+                await MainActor.run {
+                    aiLoadingForMessage = message.id
+                }
+                
+                print("🤖 Calling AI service from ThreadView: action=\(action.rawValue), threadId=\(threadId)")
+                
+                // Call AI service
+                let (response, messageId) = try await aiService.performAIAction(
+                    conversationId: conversationId,
+                    threadId: threadId,
+                    action: action,
+                    userId: userId
+                )
+                
+                print("✅ AI response received: \(response.prefix(50))...")
+                
+                // Clear loading state
+                await MainActor.run {
+                    aiLoadingForMessage = nil
+                }
+                
+                // The AI response will appear via the real-time listener
+                
+            } catch {
+                print("❌ AI action error: \(error.localizedDescription)")
+                await MainActor.run {
+                    aiLoadingForMessage = nil
+                }
+            }
+        }
+    }
+    
     private func sendReply() {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         let trimmed = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -172,10 +231,22 @@ private struct ThreadMessageBubble: View {
     let conversation: Conversation?
     let readReceiptsMap: [String: Date]
     let isLastMessage: Bool
+    let aiLoadingForMessage: String?
+    let onAIAction: (Message, AIAction) -> Void
     
     @State private var senderName: String?
     
     var body: some View {
+        // AI messages render as black bubbles
+        if message.isAI {
+            return AnyView(AIThreadMessageBubble(message: message, aiLoadingForMessage: aiLoadingForMessage))
+        }
+        
+        return AnyView(regularThreadBubble)
+    }
+    
+    @ViewBuilder
+    private var regularThreadBubble: some View {
         VStack(alignment: isMe ? .trailing : .leading, spacing: 4) {
             // Show "Replying to" label for root message
             if isRootMessage {
@@ -215,6 +286,43 @@ private struct ThreadMessageBubble: View {
                             .stroke(isMe ? Color.black : Color.clear, lineWidth: 1)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .contextMenu {
+                        Button {
+                            onAIAction(message, .summarizeThread)
+                        } label: {
+                            Label("Summarize Thread", systemImage: "doc.text.magnifyingglass")
+                        }
+                        
+                        Button {
+                            onAIAction(message, .extractActions)
+                        } label: {
+                            Label("Extract Action Items", systemImage: "checklist")
+                        }
+                        
+                        Button {
+                            onAIAction(message, .summarizeDecision)
+                        } label: {
+                            Label("Summarize Decision", systemImage: "checkmark.circle")
+                        }
+                        
+                        Button {
+                            onAIAction(message, .checkPriority)
+                        } label: {
+                            Label("Check Priority", systemImage: "exclamationmark.triangle")
+                        }
+                        
+                        Button {
+                            onAIAction(message, .extractEvent)
+                        } label: {
+                            Label("Extract Calendar Event", systemImage: "calendar.badge.plus")
+                        }
+                        
+                        Button {
+                            onAIAction(message, .trackRSVPs)
+                        } label: {
+                            Label("Track RSVPs", systemImage: "person.3")
+                        }
+                    }
                     
                     // Read/Delivered indicator for my messages
                     if isMe, isLastMessage {
@@ -281,6 +389,57 @@ private struct ThreadMessageBubble: View {
         } catch {
             print("Error loading sender name: \(error)")
         }
+    }
+}
+
+// MARK: - AI Thread Message Bubble
+private struct AIThreadMessageBubble: View {
+    let message: Message
+    let aiLoadingForMessage: String?
+    
+    var isLoading: Bool {
+        aiLoadingForMessage == message.id
+    }
+    
+    var body: some View {
+        HStack {
+            Spacer()
+            
+            VStack(alignment: .center, spacing: 6) {
+                // AI badge
+                Text("AI Assistant")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                
+                // Message bubble
+                VStack(alignment: .leading, spacing: 4) {
+                    if isLoading {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                            .padding(8)
+                    } else {
+                        Text(message.text)
+                            .foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                        
+                        if let createdAt = message.createdAt {
+                            Text(createdAt.formatted(date: .omitted, time: .shortened))
+                                .font(.caption2)
+                                .foregroundStyle(.white)
+                                .opacity(0.7)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .frame(maxWidth: 280)
+            }
+            
+            Spacer()
+        }
+        .padding(.vertical, 4)
     }
 }
 

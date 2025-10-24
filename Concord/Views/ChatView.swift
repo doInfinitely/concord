@@ -57,6 +57,10 @@ struct ChatView: View {
     @State private var typingLastSeenAt: Date? = nil
     @State private var typingVisibleSince: Date? = nil
     @State private var typingHideTask: Task<Void, Never>? = nil
+    
+    // AI Service
+    @State private var aiLoadingForMessage: String? = nil // Message ID currently processing AI
+    private let aiService = AIService()
 
     private let typingInactivityGrace: TimeInterval = 0.05  // wait this long after last event
     private let typingMinVisible: TimeInterval = 0.9       // ensure UI stays visible at least this long
@@ -272,6 +276,53 @@ struct ChatView: View {
         }
     }
     
+    // MARK: - AI Action Handler
+    private func handleAIAction(message: Message, action: AIAction) {
+        guard let userId = Auth.auth().currentUser?.uid else {
+            print("❌ No user ID for AI action")
+            return
+        }
+        
+        Task {
+            do {
+                // Set loading state
+                await MainActor.run {
+                    aiLoadingForMessage = message.id
+                }
+                
+                // Determine threadId - if this message is in a thread, use its threadId
+                // Otherwise, use the message ID as the root of a new thread
+                let threadId = message.threadId ?? message.id
+                
+                print("🤖 Calling AI service: action=\(action.rawValue), threadId=\(threadId)")
+                
+                // Call AI service
+                let (response, messageId) = try await aiService.performAIAction(
+                    conversationId: conversationId,
+                    threadId: threadId,
+                    action: action,
+                    userId: userId
+                )
+                
+                print("✅ AI response received: \(response.prefix(50))...")
+                
+                // Clear loading state
+                await MainActor.run {
+                    aiLoadingForMessage = nil
+                }
+                
+                // The AI response is automatically added to Firestore by the Cloud Function
+                // and will appear via the real-time listener
+                
+            } catch {
+                print("❌ AI action error: \(error.localizedDescription)")
+                await MainActor.run {
+                    aiLoadingForMessage = nil
+                }
+            }
+        }
+    }
+    
     private func attachReadReceiptsListener() {
         rrListener?.remove()
         let rrRef = Firestore.firestore()
@@ -372,6 +423,10 @@ struct ChatView: View {
                     onOpenThread: { message in
                         selectedThread = message
                         showThreadView = true
+                    },
+                    aiLoadingForMessage: aiLoadingForMessage,
+                    onAIAction: { message, action in
+                        handleAIAction(message: message, action: action)
                     }
                 )
                 
@@ -595,13 +650,30 @@ private struct MessagesListView: View {
     let readReceiptsMap: [String: Date]
     let loadOlder: () -> Void
     let onOpenThread: (Message) -> Void
+    let aiLoadingForMessage: String?
+    let onAIAction: (Message, AIAction) -> Void
+    
+    // Filter messages to only show those visible to current user
+    var visibleMessages: [Message] {
+        messages.filter { msg in
+            // If not an AI message, always visible
+            guard msg.isAI else { return true }
+            
+            // If no visibility restriction, visible to all
+            guard let visibleTo = msg.visibleTo else { return true }
+            
+            // Check if current user is in visibility list
+            guard let myUid = me else { return false }
+            return visibleTo.contains(myUid)
+        }
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     // Load older control (flat, not deeply nested)
-                    if cursor != nil, !messages.isEmpty {
+                    if cursor != nil, !visibleMessages.isEmpty {
                         if loadingOlder {
                             ProgressView().padding(.vertical, 8)
                         } else {
@@ -612,7 +684,7 @@ private struct MessagesListView: View {
                     }
 
                     // In your ScrollView, update the MessageRow call:
-                    ForEach(messages, id: \.id) { m in
+                    ForEach(visibleMessages, id: \.id) { m in
                         let meUid = me
                         let isMine = (m.senderId == meUid)
                         let lastMyMessageId = messages.last(where: { $0.senderId == meUid })?.id
@@ -634,11 +706,13 @@ private struct MessagesListView: View {
                             otherUserLastRead: otherUserLastRead,
                             allReadReceipts: readReceiptsMap,
                             isLastMessage: (m.id == lastMyMessageId),
+                            aiLoadingForMessage: aiLoadingForMessage,
                             onReply: {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                     onOpenThread(m)
                                 }
-                            }
+                            },
+                            onAIAction: onAIAction
                         )
                     }
                 }
@@ -667,13 +741,27 @@ private struct MessageRow: View {
     let otherUserLastRead: Date?
     let allReadReceipts: [String: Date]
     let isLastMessage: Bool
+    let aiLoadingForMessage: String?
     let onReply: () -> Void
+    let onAIAction: (Message, AIAction) -> Void
     
     @State private var bubbleWidth: CGFloat = 0
     @State private var senderName: String?
     @State private var readReceiptWidth: CGFloat = 0
 
     var body: some View {
+        Group {
+            // AI messages are rendered differently (centered, black bubble with white text)
+            if message.isAI {
+                AIMessageBubble(message: message, aiLoadingForMessage: aiLoadingForMessage)
+            } else {
+                regularMessageBody
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var regularMessageBody: some View {
         let paddingNeeded = isMe ? 12 - (cap - bubbleWidth) : 12
         let readReceiptTrailingInset = max(0, cap - bubbleWidth)
         let isGroupChat = (conversation?.memberCount ?? 0) > 2
@@ -722,6 +810,44 @@ private struct MessageRow: View {
                         onReply()
                     } label: {
                         Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                    
+                    Divider()
+                    
+                    Button {
+                        onAIAction(message, .summarizeThread)
+                    } label: {
+                        Label("Summarize Thread", systemImage: "doc.text.magnifyingglass")
+                    }
+                    
+                    Button {
+                        onAIAction(message, .extractActions)
+                    } label: {
+                        Label("Extract Action Items", systemImage: "checklist")
+                    }
+                    
+                    Button {
+                        onAIAction(message, .summarizeDecision)
+                    } label: {
+                        Label("Summarize Decision", systemImage: "checkmark.circle")
+                    }
+                    
+                    Button {
+                        onAIAction(message, .checkPriority)
+                    } label: {
+                        Label("Check Priority", systemImage: "exclamationmark.triangle")
+                    }
+                    
+                    Button {
+                        onAIAction(message, .extractEvent)
+                    } label: {
+                        Label("Extract Calendar Event", systemImage: "calendar.badge.plus")
+                    }
+                    
+                    Button {
+                        onAIAction(message, .trackRSVPs)
+                    } label: {
+                        Label("Track RSVPs", systemImage: "person.3")
                     }
                 }
                 
@@ -858,5 +984,56 @@ private struct WaveText: View {
             }
             .foregroundStyle(.black)
         }
+    }
+}
+
+// MARK: - AI Message Bubble
+private struct AIMessageBubble: View {
+    let message: Message
+    let aiLoadingForMessage: String?
+    
+    var isLoading: Bool {
+        aiLoadingForMessage == message.id
+    }
+    
+    var body: some View {
+        HStack {
+            Spacer()
+            
+            VStack(alignment: .center, spacing: 6) {
+                // AI badge
+                Text("AI Assistant")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                
+                // Message bubble
+                VStack(alignment: .leading, spacing: 4) {
+                    if isLoading {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                            .padding(8)
+                    } else {
+                        Text(message.text)
+                            .foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                        
+                        if let createdAt = message.createdAt {
+                            Text(createdAt.formatted(date: .omitted, time: .shortened))
+                                .font(.caption2)
+                                .foregroundStyle(.white)
+                                .opacity(0.7)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .frame(maxWidth: 280)
+            }
+            
+            Spacer()
+        }
+        .padding(.vertical, 4)
     }
 }

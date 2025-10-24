@@ -1,0 +1,77 @@
+//
+//  AIService.swift
+//  Concord
+//
+//  AI service for calling Cloud Functions
+//
+
+import Foundation
+import FirebaseFunctions
+
+enum AIAction: String {
+    case summarizeThread = "summarize_thread"
+    case extractActions = "extract_actions"
+    case checkPriority = "check_priority"
+    case summarizeDecision = "summarize_decision"
+    case extractEvent = "extract_event"
+    case trackRSVPs = "track_rsvps"
+}
+
+class AIService {
+    private let functions = Functions.functions()
+    
+    /// Call the AI service Cloud Function
+    func performAIAction(
+        conversationId: String,
+        threadId: String?,
+        action: AIAction,
+        userId: String
+    ) async throws -> (response: String, messageId: String) {
+        let callable = functions.httpsCallable("aiService")
+        
+        let data: [String: Any] = [
+            "conversationId": conversationId,
+            "threadId": threadId as Any,
+            "action": action.rawValue,
+            "userId": userId
+        ]
+        
+        do {
+            let result = try await callable.call(data)
+            
+            print("🤖 AI Service raw response: \(result.data)")
+            
+            guard let resultData = result.data as? [String: Any],
+                  let success = resultData["success"] as? Bool,
+                  success,
+                  let response = resultData["response"] as? String,
+                  let messageId = resultData["messageId"] as? String else {
+                
+                // Check if there's an error message in the response
+                if let resultData = result.data as? [String: Any],
+                   let errorMsg = resultData["error"] as? String {
+                    print("❌ AI Service returned error: \(errorMsg)")
+                    throw NSError(
+                        domain: "AIService",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: errorMsg]
+                    )
+                }
+                
+                throw NSError(
+                    domain: "AIService",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid response from AI service: \(result.data)"]
+                )
+            }
+            
+            return (response, messageId)
+        } catch let error as NSError {
+            print("❌ AI Service error: \(error)")
+            print("❌ Error domain: \(error.domain), code: \(error.code)")
+            print("❌ Error userInfo: \(error.userInfo)")
+            throw error
+        }
+    }
+}
+

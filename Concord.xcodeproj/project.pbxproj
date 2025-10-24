@@ -13,6 +13,7 @@
 		AD9D6F002EA8786600A1E7B2 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = AD9D6EFF2EA8786600A1E7B2 /* GoogleSignIn */; };
 		AD9D6F022EA8786600A1E7B2 /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = AD9D6F012EA8786600A1E7B2 /* GoogleSignInSwift */; };
 		AD9D6F042EA8788A00A1E7B2 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = AD9D6F032EA8788A00A1E7B2 /* FirebaseMessaging */; };
+		ADFC812F2EAB507B007DAD38 /* FirebaseFunctions in Frameworks */ = {isa = PBXBuildFile; productRef = ADFC812E2EAB507B007DAD38 /* FirebaseFunctions */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -46,6 +47,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AD9D6F042EA8788A00A1E7B2 /* FirebaseMessaging in Frameworks */,
+				ADFC812F2EAB507B007DAD38 /* FirebaseFunctions in Frameworks */,
 				AD9D6F022EA8786600A1E7B2 /* GoogleSignInSwift in Frameworks */,
 				AD9D6EC92EA743E400A1E7B2 /* FirebaseAnalytics in Frameworks */,
 				AD9D6F002EA8786600A1E7B2 /* GoogleSignIn in Frameworks */,
@@ -61,6 +63,7 @@
 			isa = PBXGroup;
 			children = (
 				AD9D6EB92EA6F17B00A1E7B2 /* Concord */,
+				ADFC812D2EAB507B007DAD38 /* Frameworks */,
 				AD9D6EB82EA6F17B00A1E7B2 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -71,6 +74,13 @@
 				AD9D6EB72EA6F17B00A1E7B2 /* Concord.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		ADFC812D2EAB507B007DAD38 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -99,6 +109,7 @@
 				AD9D6EFF2EA8786600A1E7B2 /* GoogleSignIn */,
 				AD9D6F012EA8786600A1E7B2 /* GoogleSignInSwift */,
 				AD9D6F032EA8788A00A1E7B2 /* FirebaseMessaging */,
+				ADFC812E2EAB507B007DAD38 /* FirebaseFunctions */,
 			);
 			productName = Concord;
 			productReference = AD9D6EB72EA6F17B00A1E7B2 /* Concord.app */;
@@ -420,6 +431,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AD9D6EC72EA743E400A1E7B2 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseMessaging;
+		};
+		ADFC812E2EAB507B007DAD38 /* FirebaseFunctions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AD9D6EC72EA743E400A1E7B2 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFunctions;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

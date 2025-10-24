@@ -122,7 +122,10 @@ final class FirestoreService {
                     status: d["status"] as? String,
                     threadId: d["threadId"] as? String,
                     parentMessageId: d["parentMessageId"] as? String,
-                    replyCount: (d["replyCount"] as? Int) ?? 0
+                    replyCount: (d["replyCount"] as? Int) ?? 0,
+                    isAI: (d["isAI"] as? Bool) ?? false,
+                    visibleTo: d["visibleTo"] as? [String],
+                    aiAction: d["aiAction"] as? String
                 )
             }
             onChange(msgs)
@@ -149,7 +152,10 @@ final class FirestoreService {
                 status: rootData["status"] as? String,
                 threadId: rootData["threadId"] as? String,
                 parentMessageId: rootData["parentMessageId"] as? String,
-                replyCount: (rootData["replyCount"] as? Int) ?? 0
+                replyCount: (rootData["replyCount"] as? Int) ?? 0,
+                isAI: (rootData["isAI"] as? Bool) ?? false,
+                visibleTo: rootData["visibleTo"] as? [String],
+                aiAction: rootData["aiAction"] as? String
             ))
         }
         
@@ -169,7 +175,10 @@ final class FirestoreService {
                 status: d["status"] as? String,
                 threadId: d["threadId"] as? String,
                 parentMessageId: d["parentMessageId"] as? String,
-                replyCount: (d["replyCount"] as? Int) ?? 0
+                replyCount: (d["replyCount"] as? Int) ?? 0,
+                isAI: (d["isAI"] as? Bool) ?? false,
+                visibleTo: d["visibleTo"] as? [String],
+                aiAction: d["aiAction"] as? String
             ))
         }
         
@@ -214,7 +223,10 @@ final class FirestoreService {
                     status: d["status"] as? String,
                     threadId: d["threadId"] as? String,
                     parentMessageId: d["parentMessageId"] as? String,
-                    replyCount: (d["replyCount"] as? Int) ?? 0
+                    replyCount: (d["replyCount"] as? Int) ?? 0,
+                    isAI: (d["isAI"] as? Bool) ?? false,
+                    visibleTo: d["visibleTo"] as? [String],
+                    aiAction: d["aiAction"] as? String
                 )
                 print("  - Message: \(msg.text.prefix(30))... threadId=\(msg.threadId ?? "nil")")
                 messages.append(msg)
@@ -332,7 +344,10 @@ final class FirestoreService {
                 status: d["status"] as? String,
                 threadId: d["threadId"] as? String,
                 parentMessageId: d["parentMessageId"] as? String,
-                replyCount: (d["replyCount"] as? Int) ?? 0
+                replyCount: (d["replyCount"] as? Int) ?? 0,
+                isAI: (d["isAI"] as? Bool) ?? false,
+                visibleTo: d["visibleTo"] as? [String],
+                aiAction: d["aiAction"] as? String
             )
         }.reversed())
 

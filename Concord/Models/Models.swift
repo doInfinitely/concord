@@ -30,6 +30,9 @@ struct Message: Identifiable {
     let threadId: String?       // ID of the thread this message belongs to (nil if not a reply)
     let parentMessageId: String? // ID of the message being replied to (nil if not a reply)
     var replyCount: Int          // Number of replies to this message
+    let isAI: Bool               // True if this is an AI-generated message
+    let visibleTo: [String]?     // User IDs who can see this AI message (nil = visible to all)
+    let aiAction: String?        // Type of AI action (summarize_thread, extract_actions, etc.)
 }
 
 enum FS {
