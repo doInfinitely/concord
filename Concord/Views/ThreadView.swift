@@ -444,12 +444,16 @@ private struct AIThreadMessageBubble: View {
         eventData.date = date
         eventData.duration = 3600 // Default 1 hour
         
-        // Try to extract title from the conflict message
-        // The message contains info about what meeting was proposed
-        if let titleRange = originalMessage.range(of: "proposed meeting") {
-            eventData.title = "Meeting"
+        // Extract meeting subject from the metadata tag
+        if let subjectRange = originalMessage.range(of: #"\[MEETING_SUBJECT:([^\]]+)\]"#, options: .regularExpression),
+           let match = try? NSRegularExpression(pattern: #"\[MEETING_SUBJECT:([^\]]+)\]"#).firstMatch(
+               in: originalMessage,
+               range: NSRange(originalMessage.startIndex..., in: originalMessage)
+           ),
+           let titleRange = Range(match.range(at: 1), in: originalMessage) {
+            eventData.title = String(originalMessage[titleRange])
         } else {
-            eventData.title = "Event"
+            eventData.title = "Meeting"
         }
         
         extractedEvent = eventData
@@ -507,10 +511,18 @@ private struct AIThreadMessageBubble: View {
                                 .fontWeight(.bold)
                                 .foregroundStyle(.white)
                             
-                            // Body text (remove the header from the message)
-                            let bodyText = message.text
-                                .replacingOccurrences(of: "**Calendar Conflict Detected**", with: "")
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            // Compute cleaned body text
+                            let bodyText: String = {
+                                var text = message.text
+                                    .replacingOccurrences(of: "**Calendar Conflict Detected**", with: "")
+                                
+                                // Remove metadata tag using a more explicit pattern
+                                if let metadataRange = text.range(of: #"\[MEETING_SUBJECT:[^\]]+\]"#, options: .regularExpression) {
+                                    text.removeSubrange(metadataRange)
+                                }
+                                
+                                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }()
                             
                             // Split text around "Suggested alternatives:"
                             if let range = bodyText.range(of: "**Suggested alternatives:**") {
@@ -524,7 +536,7 @@ private struct AIThreadMessageBubble: View {
                                 }
                                 
                                 // Animated "Suggested alternatives:"
-                                WaveText(text: "Suggested alternatives:", color: .white)
+                                WalkingBumpsText(text: "Suggested alternatives:", color: .white)
                                     .font(.subheadline)
                                     .fontWeight(.bold)
                                     .padding(.top, 4)
@@ -603,6 +615,53 @@ private struct WaveText: View {
             }
             .foregroundStyle(color)
         }
+    }
+}
+
+// MARK: - Walking Bumps Text Animation (for suggestions)
+private struct WalkingBumpsText: View {
+    let text: String
+    var color: Color = .white
+    
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            HStack(spacing: 0) {
+                ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+                    Text(String(character))
+                        .offset(y: bumpOffset(for: index, at: timeline.date, textLength: text.count))
+                }
+            }
+            .foregroundStyle(color)
+        }
+    }
+    
+    private func bumpOffset(for index: Int, at date: Date, textLength: Int) -> CGFloat {
+        let time = date.timeIntervalSinceReferenceDate
+        
+        // Cycle: 3.5s walking, 1s pause, repeat
+        let walkingDuration = 3.5
+        let totalCycle = 4.5
+        let cycleTime = time.truncatingRemainder(dividingBy: totalCycle)
+        let isWalking = cycleTime < walkingDuration
+        
+        guard isWalking else { return 0 }
+        
+        // Bump travels from -3 to textLength + 3 over 3.5 seconds
+        let bumpCenter = (cycleTime / walkingDuration) * Double(textLength + 6) - 3.0
+        
+        // Distance from this character to the bump center
+        let distanceFromCenter = Double(index) - bumpCenter
+        
+        // Positive bump (Gaussian-like)
+        let positiveBump = exp(-pow(distanceFromCenter, 2) / 2.0)
+        
+        // Negative bump (shifted right by 2 characters)
+        let distanceFromNegative = Double(index) - (bumpCenter + 2.5)
+        let negativeBump = exp(-pow(distanceFromNegative, 2) / 2.0)
+        
+        // Combine: positive bump up, negative bump down
+        let amplitude: CGFloat = 4.0
+        return amplitude * (positiveBump - negativeBump)
     }
 }
 

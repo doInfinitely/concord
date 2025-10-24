@@ -66,6 +66,9 @@ struct ChatView: View {
     @State private var showCreateEvent = false
     @State private var extractedEvent = ExtractedEventData()
     @StateObject private var calendarService = CalendarService()
+    
+    // Track processed messages to avoid duplicates
+    @State private var processedMessageIds = Set<String>()
 
     private let typingInactivityGrace: TimeInterval = 0.05  // wait this long after last event
     private let typingMinVisible: TimeInterval = 0.9       // ensure UI stays visible at least this long
@@ -375,6 +378,28 @@ struct ChatView: View {
         }
     }
     
+    private func extractMeetingSubject(from text: String) async -> String {
+        // Use AI to extract the meeting subject naturally
+        do {
+            let (subject, _) = try await aiService.performAIAction(
+                conversationId: conversationId,
+                threadId: nil,
+                action: .extractMeetingSubject,
+                userId: Auth.auth().currentUser?.uid ?? "",
+                messageText: text
+            )
+            
+            let cleaned = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"", with: "")
+            
+            return cleaned.isEmpty ? "Meeting" : cleaned
+        } catch {
+            print("❌ Failed to extract meeting subject via AI: \(error)")
+            // Simple fallback
+            return "Meeting"
+        }
+    }
+    
     private func checkForMeetingProposals(in newMessages: [Message]) async {
         guard let uid = Auth.auth().currentUser?.uid else {
             print("📅 Proactive: No uid")
@@ -384,6 +409,12 @@ struct ChatView: View {
         print("📅 Proactive: Checking \(newMessages.count) messages")
         
         for message in newMessages {
+            // Skip if already processed
+            if processedMessageIds.contains(message.id) {
+                print("📅 Proactive: Skipping (already processed): \(message.id)")
+                continue
+            }
+            
             print("📅 Proactive: Message from \(message.senderId): '\(message.text.prefix(50))...'")
             
             // Skip AI messages
@@ -391,6 +422,9 @@ struct ChatView: View {
                 print("📅 Proactive: Skipping (AI message)")
                 continue
             }
+            
+            // Mark as processed
+            processedMessageIds.insert(message.id)
             
             // Check MY calendar for conflicts with ANY meeting proposal
             // (doesn't matter who sent it - if there's a conflict, I should know)
@@ -435,11 +469,16 @@ struct ChatView: View {
                         }.joined(separator: "\n")
                     }
                     
+                    // Extract meeting subject from original message using AI
+                    let meetingSubject = await extractMeetingSubject(from: message.text)
+                    
                     let aiMessage = """
                     **Calendar Conflict Detected**
                     
                     The proposed meeting time **\(dateFormatter.string(from: proposedDate))** conflicts with:
                     \(conflictList)\(suggestionText)
+                    
+                    [MEETING_SUBJECT:\(meetingSubject)]
                     """
                     
                     // Insert proactive AI message (visible only to current user)
@@ -1169,6 +1208,53 @@ private struct WaveText: View {
     }
 }
 
+// MARK: - Walking Bumps Text Animation (for suggestions)
+private struct WalkingBumpsText: View {
+    let text: String
+    var color: Color = .white
+    
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            HStack(spacing: 0) {
+                ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+                    Text(String(character))
+                        .offset(y: bumpOffset(for: index, at: timeline.date, textLength: text.count))
+                }
+            }
+            .foregroundStyle(color)
+        }
+    }
+    
+    private func bumpOffset(for index: Int, at date: Date, textLength: Int) -> CGFloat {
+        let time = date.timeIntervalSinceReferenceDate
+        
+        // Cycle: 3.5s walking, 1s pause, repeat
+        let walkingDuration = 3.5
+        let totalCycle = 4.5
+        let cycleTime = time.truncatingRemainder(dividingBy: totalCycle)
+        let isWalking = cycleTime < walkingDuration
+        
+        guard isWalking else { return 0 }
+        
+        // Bump travels from -3 to textLength + 3 over 3.5 seconds
+        let bumpCenter = (cycleTime / walkingDuration) * Double(textLength + 6) - 3.0
+        
+        // Distance from this character to the bump center
+        let distanceFromCenter = Double(index) - bumpCenter
+        
+        // Positive bump (Gaussian-like)
+        let positiveBump = exp(-pow(distanceFromCenter, 2) / 2.0)
+        
+        // Negative bump (shifted right by 2 characters)
+        let distanceFromNegative = Double(index) - (bumpCenter + 2.5)
+        let negativeBump = exp(-pow(distanceFromNegative, 2) / 2.0)
+        
+        // Combine: positive bump up, negative bump down
+        let amplitude: CGFloat = 4.0
+        return amplitude * (positiveBump - negativeBump)
+    }
+}
+
 // MARK: - Oscillating Text Animation (for AI alerts)
 private struct OscillatingText: View {
     let text: String
@@ -1222,12 +1308,16 @@ private struct AIMessageBubble: View {
         eventData.date = date
         eventData.duration = 3600 // Default 1 hour
         
-        // Try to extract title from the conflict message
-        // The message contains info about what meeting was proposed
-        if let titleRange = originalMessage.range(of: "proposed meeting") {
-            eventData.title = "Meeting"
+        // Extract meeting subject from the metadata tag
+        if let subjectRange = originalMessage.range(of: #"\[MEETING_SUBJECT:([^\]]+)\]"#, options: .regularExpression),
+           let match = try? NSRegularExpression(pattern: #"\[MEETING_SUBJECT:([^\]]+)\]"#).firstMatch(
+               in: originalMessage,
+               range: NSRange(originalMessage.startIndex..., in: originalMessage)
+           ),
+           let titleRange = Range(match.range(at: 1), in: originalMessage) {
+            eventData.title = String(originalMessage[titleRange])
         } else {
-            eventData.title = "Event"
+            eventData.title = "Meeting"
         }
         
         extractedEvent = eventData
@@ -1285,10 +1375,18 @@ private struct AIMessageBubble: View {
                                 .fontWeight(.bold)
                                 .foregroundStyle(.white)
                             
-                            // Body text (remove the header from the message)
-                            let bodyText = message.text
-                                .replacingOccurrences(of: "**Calendar Conflict Detected**", with: "")
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            // Compute cleaned body text
+                            let bodyText: String = {
+                                var text = message.text
+                                    .replacingOccurrences(of: "**Calendar Conflict Detected**", with: "")
+                                
+                                // Remove metadata tag using a more explicit pattern
+                                if let metadataRange = text.range(of: #"\[MEETING_SUBJECT:[^\]]+\]"#, options: .regularExpression) {
+                                    text.removeSubrange(metadataRange)
+                                }
+                                
+                                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }()
                             
                             // Split text around "Suggested alternatives:"
                             if let range = bodyText.range(of: "**Suggested alternatives:**") {
@@ -1302,7 +1400,7 @@ private struct AIMessageBubble: View {
                                 }
                                 
                                 // Animated "Suggested alternatives:"
-                                WaveText(text: "Suggested alternatives:", color: .white)
+                                WalkingBumpsText(text: "Suggested alternatives:", color: .white)
                                     .font(.subheadline)
                                     .fontWeight(.bold)
                                     .padding(.top, 4)

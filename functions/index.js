@@ -214,7 +214,7 @@ exports.sendGroupAddedNotification = onDocumentUpdated(
 exports.aiService = onCall(
     {secrets: [openaiApiKey]},
     async (request) => {
-        const {conversationId, threadId, action, userId} = request.data;
+        const {conversationId, threadId, action, userId, messageText} = request.data;
         
         if (!userId) {
             throw new Error("User ID is required");
@@ -395,6 +395,23 @@ Return ONLY a valid JSON object (no markdown, no extra text):
                     systemPrompt = "You are a helpful assistant that tracks RSVPs and responses to questions. List who responded, what they said, and who hasn't responded yet.";
                     userPrompt = `Track RSVPs and responses in this conversation:\n\n${conversationContext}`;
                     break;
+                
+                case "extract_meeting_subject":
+                    if (!messageText) {
+                        throw new Error("messageText is required for extract_meeting_subject action");
+                    }
+                    systemPrompt = `You are a helpful assistant that extracts the subject/purpose of a meeting from a message. 
+Extract ONLY the meeting subject - what the meeting is about.
+
+Examples:
+- "Let's meet at 3pm today for the Farmer's Market." → "Farmer's Market"
+- "Coffee at 3pm tomorrow" → "Coffee"
+- "Team meeting next Thursday at 2pm" → "Team meeting"
+- "Let's meet for lunch" → "Lunch"
+
+Return ONLY the subject text, no quotes, no extra explanation.`;
+                    userPrompt = `Extract the meeting subject from this message:\n\n${messageText}`;
+                    break;
                     
                 default:
                     throw new Error(`Unknown action: ${action}`);
@@ -413,13 +430,13 @@ Return ONLY a valid JSON object (no markdown, no extra text):
             
             const aiResponse = completion.choices[0].message.content;
             
-            // For calendar events, don't store as a message - return JSON directly
-            if (action === "extract_event") {
-                console.log(`Calendar event extracted for user: ${userId}`);
+            // For calendar events and meeting subject extraction, don't store as a message - return directly
+            if (action === "extract_event" || action === "extract_meeting_subject") {
+                console.log(`${action} completed for user: ${userId}`);
                 return {
                     success: true,
                     response: aiResponse,
-                    messageId: null // No message created for calendar events
+                    messageId: null // No message created
                 };
             }
             

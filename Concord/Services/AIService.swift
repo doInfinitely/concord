@@ -15,6 +15,7 @@ enum AIAction: String {
     case summarizeDecision = "summarize_decision"
     case extractEvent = "extract_event"
     case trackRSVPs = "track_rsvps"
+    case extractMeetingSubject = "extract_meeting_subject"
 }
 
 class AIService {
@@ -25,16 +26,21 @@ class AIService {
         conversationId: String,
         threadId: String?,
         action: AIAction,
-        userId: String
+        userId: String,
+        messageText: String? = nil
     ) async throws -> (response: String, messageId: String) {
         let callable = functions.httpsCallable("aiService")
         
-        let data: [String: Any] = [
+        var data: [String: Any] = [
             "conversationId": conversationId,
             "threadId": threadId as Any,
             "action": action.rawValue,
             "userId": userId
         ]
+        
+        if let messageText = messageText {
+            data["messageText"] = messageText
+        }
         
         do {
             let result = try await callable.call(data)
