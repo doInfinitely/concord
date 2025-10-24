@@ -436,16 +436,63 @@ private struct AIThreadMessageBubble: View {
                     .foregroundStyle(.secondary)
                 
                 // Message bubble
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 8) {
                     if isLoading {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .tint(.white)
                             .padding(8)
                     } else {
-                        Text(parseMarkdown(message.text))
-                            .foregroundStyle(.white)
-                            .fixedSize(horizontal: false, vertical: true)
+                        // Check if this is a conflict detection message
+                        if message.aiAction == "proactive_conflict_detection" {
+                            // Animated header
+                            OscillatingText(text: "Calendar Conflict Detected")
+                                .font(.headline)
+                                .fontWeight(.bold)
+                                .foregroundStyle(.white)
+                            
+                            // Body text (remove the header from the message)
+                            let bodyText = message.text
+                                .replacingOccurrences(of: "**Calendar Conflict Detected**", with: "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            
+                            // Split text around "Suggested alternatives:"
+                            if let range = bodyText.range(of: "**Suggested alternatives:**") {
+                                // Text before suggestions
+                                let beforeText = String(bodyText[..<range.lowerBound])
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !beforeText.isEmpty {
+                                    Text(parseMarkdown(beforeText))
+                                        .foregroundStyle(.white)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                
+                                // Animated "Suggested alternatives:"
+                                WaveText(text: "Suggested alternatives:", color: .white)
+                                    .font(.subheadline)
+                                    .fontWeight(.bold)
+                                    .padding(.top, 4)
+                                
+                                // Text after suggestions (the list)
+                                let afterText = String(bodyText[range.upperBound...])
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !afterText.isEmpty {
+                                    Text(parseMarkdown(afterText))
+                                        .foregroundStyle(.white)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            } else {
+                                // No suggestions, just show the body text
+                                Text(parseMarkdown(bodyText))
+                                    .foregroundStyle(.white)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        } else {
+                            // Regular AI message
+                            Text(parseMarkdown(message.text))
+                                .foregroundStyle(.white)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         
                         if let createdAt = message.createdAt {
                             Text(createdAt.formatted(date: .omitted, time: .shortened))
@@ -474,6 +521,60 @@ private func parseMarkdown(_ text: String) -> AttributedString {
     } catch {
         // If markdown parsing fails, return plain text
         return AttributedString(text)
+    }
+}
+
+// MARK: - Wave Text Animation
+private struct WaveText: View {
+    let text: String
+    var color: Color = .black
+    
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            HStack(spacing: 0) {
+                ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+                    Text(String(character))
+                        .offset(y: sin((timeline.date.timeIntervalSinceReferenceDate * 2) + Double(index) * 0.67) * 2)
+                }
+            }
+            .foregroundStyle(color)
+        }
+    }
+}
+
+// MARK: - Oscillating Text Animation (for AI alerts)
+private struct OscillatingText: View {
+    let text: String
+    
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            HStack(spacing: 0) {
+                ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+                    Text(String(character))
+                        .offset(x: oscillationOffset(for: index, at: timeline.date))
+                }
+            }
+        }
+    }
+    
+    private func oscillationOffset(for index: Int, at date: Date) -> CGFloat {
+        let time = date.timeIntervalSinceReferenceDate
+        
+        // Pulsing pattern: 1.5s oscillate, 0.75s pause, repeat
+        let cycleTime = time.truncatingRemainder(dividingBy: 2.25)
+        let isOscillating = cycleTime < 1.5
+        
+        guard isOscillating else { return 0 }
+        
+        // Triangular wave function
+        let phaseTime = cycleTime * 4.0 // Faster oscillation frequency
+        let triangularWave = abs(2.0 * (phaseTime - floor(phaseTime + 0.5))) - 0.5
+        
+        // Alternate direction for each letter
+        let direction: CGFloat = index % 2 == 0 ? 1.0 : -1.0
+        
+        // Amplitude of 1.5 points (subtle vibration)
+        return direction * triangularWave * 1.5
     }
 }
 
