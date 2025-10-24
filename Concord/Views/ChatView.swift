@@ -440,8 +440,37 @@ struct ChatView: View {
                         }
                     },
                     onOpenThread: { message in
-                        selectedThread = message
-                        showThreadView = true
+                        // If message is a reply, find the root message
+                        if let threadId = message.threadId {
+                            // This is a reply - find the root message
+                            if let rootMsg = messages.first(where: { $0.id == threadId }) {
+                                selectedThread = rootMsg
+                                showThreadView = true
+                            } else {
+                                // Root not found in current messages, fetch it
+                                Task {
+                                    do {
+                                        let fetchedRoot = try await store.getMessage(
+                                            conversationId: conversationId,
+                                            messageId: threadId
+                                        )
+                                        await MainActor.run {
+                                            selectedThread = fetchedRoot
+                                            showThreadView = true
+                                        }
+                                    } catch {
+                                        print("❌ Failed to fetch root message: \(error)")
+                                        // Fallback: use the reply as root (not ideal but works)
+                                        selectedThread = message
+                                        showThreadView = true
+                                    }
+                                }
+                            }
+                        } else {
+                            // This is a root message
+                            selectedThread = message
+                            showThreadView = true
+                        }
                     },
                     aiLoadingForMessage: aiLoadingForMessage,
                     onAIAction: { message, action in
@@ -629,7 +658,7 @@ struct ChatView: View {
                 if showThreadView, let thread = selectedThread {
                     ThreadOverlayView(
                         conversationId: conversationId,
-                        threadId: thread.id,
+                        threadId: thread.threadId ?? thread.id, // Use thread's threadId if it's a reply, else use its own ID
                         rootMessage: thread,
                         isPresented: $showThreadView,
                         conversation: conversation,
@@ -879,7 +908,7 @@ private struct MessageRow: View {
                     }
                 }
                 
-                // Reply count badge
+                // Reply count badge - shows total replies in thread
                 if message.replyCount > 0 {
                     Button {
                         onReply()

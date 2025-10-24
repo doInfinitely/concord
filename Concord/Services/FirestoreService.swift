@@ -40,6 +40,33 @@ final class FirestoreService {
         return try await createConversation(members: [uid], name: "Saved")
     }
 
+    // Get a single message by ID
+    func getMessage(conversationId: String, messageId: String) async throws -> Message {
+        let doc = try await db.collection("conversations")
+            .document(conversationId)
+            .collection("messages")
+            .document(messageId)
+            .getDocument()
+        
+        guard let data = doc.data() else {
+            throw NSError(domain: "FirestoreService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Message not found"])
+        }
+        
+        return Message(
+            id: doc.documentID,
+            senderId: data["senderId"] as? String ?? "",
+            text: data["text"] as? String ?? "",
+            createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
+            status: data["status"] as? String,
+            threadId: data["threadId"] as? String,
+            parentMessageId: data["parentMessageId"] as? String,
+            replyCount: data["replyCount"] as? Int ?? 0,
+            isAI: data["isAI"] as? Bool ?? false,
+            visibleTo: data["visibleTo"] as? [String],
+            aiAction: data["aiAction"] as? String
+        )
+    }
+    
     // Send a message and update lastMessage fields atomically.
     func sendMessage(conversationId: String, senderId: String, text: String, parentMessageId: String? = nil) async throws {
         let convRef = db.collection("conversations").document(conversationId)   // ← declare once
@@ -69,12 +96,42 @@ final class FirestoreService {
         ]
         
         if let parentId = parentMessageId {
+            let resolvedThreadId = threadId ?? parentId
             messageData["parentMessageId"] = parentId
-            messageData["threadId"] = threadId ?? parentId
+            messageData["threadId"] = resolvedThreadId
             
-            // Increment reply count on parent message
-            let parentRef = convRef.collection("messages").document(threadId ?? parentId)
-            batch.updateData(["replyCount": FieldValue.increment(Int64(1))], forDocument: parentRef)
+            // Increment reply count on ALL messages in the thread (root + all replies)
+            // First, get all messages in this thread
+            let threadMessagesQuery = convRef.collection("messages")
+                .whereField("threadId", isEqualTo: resolvedThreadId)
+            
+            do {
+                let threadSnapshot = try await threadMessagesQuery.getDocuments()
+                
+                // Calculate new reply count
+                let currentCount = threadSnapshot.documents.count + 1 // +1 for the reply we're adding
+                
+                // Set the new message's replyCount to match the thread
+                messageData["replyCount"] = currentCount
+                
+                // Increment replyCount on the root message
+                let rootRef = convRef.collection("messages").document(resolvedThreadId)
+                batch.updateData(["replyCount": FieldValue.increment(Int64(1))], forDocument: rootRef)
+                
+                // Increment replyCount on all existing replies in the thread
+                for doc in threadSnapshot.documents {
+                    batch.updateData(["replyCount": FieldValue.increment(Int64(1))], forDocument: doc.reference)
+                }
+                
+                print("🧵 Set new reply count to \(currentCount), incremented root + \(threadSnapshot.documents.count) existing replies")
+            } catch {
+                print("⚠️ Failed to update reply counts for thread: \(error)")
+                // Still increment on root at minimum
+                let rootRef = convRef.collection("messages").document(resolvedThreadId)
+                batch.updateData(["replyCount": FieldValue.increment(Int64(1))], forDocument: rootRef)
+                // Set new message to have count of 1
+                messageData["replyCount"] = 1
+            }
         }
         
         batch.setData(messageData, forDocument: msgRef)

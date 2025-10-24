@@ -89,23 +89,21 @@ struct ThreadOverlayView: View {
                                 }
                             )
                             
-                            // Show replies if any
-                            if visibleMessages.count > 1 {
-                                ForEach(Array(visibleMessages.dropFirst().enumerated()), id: \.element.id) { index, message in
-                                    let isLast = index == visibleMessages.count - 2 // -2 because we dropped first
-                                    ThreadMessageBubble(
-                                        message: message,
-                                        isMe: message.senderId == Auth.auth().currentUser?.uid,
-                                        isRootMessage: false,
-                                        conversation: conversation,
-                                        readReceiptsMap: readReceiptsMap,
-                                        isLastMessage: isLast && message.senderId == Auth.auth().currentUser?.uid,
-                                        aiLoadingForMessage: aiLoadingForMessage,
-                                        onAIAction: { message, action in
-                                            handleAIAction(message: message, action: action)
-                                        }
-                                    )
-                                }
+                            // Show replies
+                            ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
+                                let isLast = index == visibleMessages.count - 1
+                                ThreadMessageBubble(
+                                    message: message,
+                                    isMe: message.senderId == Auth.auth().currentUser?.uid,
+                                    isRootMessage: false,
+                                    conversation: conversation,
+                                    readReceiptsMap: readReceiptsMap,
+                                    isLastMessage: isLast && message.senderId == Auth.auth().currentUser?.uid,
+                                    aiLoadingForMessage: aiLoadingForMessage,
+                                    onAIAction: { message, action in
+                                        handleAIAction(message: message, action: action)
+                                    }
+                                )
                             }
                         }
                         .padding()
