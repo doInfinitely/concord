@@ -36,6 +36,8 @@ struct ChatView: View {
     @State private var conversation: Conversation?
     @State private var isEditingTitle: Bool = false
     @State private var editableTitleText: String = ""
+    @State private var selectedThread: Message? = nil
+    @State private var showThreadView: Bool = false
 
     // Pagination
     @State private var cursor: QueryDocumentSnapshot? = nil
@@ -366,6 +368,10 @@ struct ChatView: View {
                                 cursor = nextCursor
                             } catch { /* ignore */ }
                         }
+                    },
+                    onOpenThread: { message in
+                        selectedThread = message
+                        showThreadView = true
                     }
                 )
                 
@@ -542,6 +548,18 @@ struct ChatView: View {
             .onChange(of: messages.last?.id) { _ in
                 updateMyReadReceiptIfNeeded()
             }
+            .overlay {
+                if showThreadView, let thread = selectedThread {
+                    ThreadOverlayView(
+                        conversationId: conversationId,
+                        threadId: thread.id,
+                        rootMessage: thread,
+                        isPresented: $showThreadView,
+                        conversation: conversation,
+                        readReceiptsMap: readReceipts
+                    )
+                }
+            }
             .onDisappear {
                 // Mark view as inactive
                 isViewActive = false
@@ -576,6 +594,7 @@ private struct MessagesListView: View {
     let conversation: Conversation?
     let readReceiptsMap: [String: Date]
     let loadOlder: () -> Void
+    let onOpenThread: (Message) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -614,7 +633,12 @@ private struct MessagesListView: View {
                             conversation: conversation,
                             otherUserLastRead: otherUserLastRead,
                             allReadReceipts: readReceiptsMap,
-                            isLastMessage: (m.id == lastMyMessageId)
+                            isLastMessage: (m.id == lastMyMessageId),
+                            onReply: {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                    onOpenThread(m)
+                                }
+                            }
                         )
                     }
                 }
@@ -643,6 +667,7 @@ private struct MessageRow: View {
     let otherUserLastRead: Date?
     let allReadReceipts: [String: Date]
     let isLastMessage: Bool
+    let onReply: () -> Void
     
     @State private var bubbleWidth: CGFloat = 0
     @State private var senderName: String?
@@ -692,6 +717,27 @@ private struct MessageRow: View {
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .frame(maxWidth: cap, alignment: .leading)
+                .contextMenu {
+                    Button {
+                        onReply()
+                    } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                }
+                
+                // Reply count badge
+                if message.replyCount > 0 {
+                    Button {
+                        onReply()
+                    } label: {
+                        Text(message.replyCount == 1 ? "1 Reply" : "\(message.replyCount) Replies")
+                            .font(.caption)
+                            .foregroundStyle(.blue)
+                            .padding(.top, 2)
+                    }
+                    .frame(maxWidth: cap, alignment: isMe ? .trailing : .leading)
+                    .padding(.trailing, isMe ? readReceiptTrailingInset : 0)
+                }
                 
                 if isMe, isLastMessage {
                     Text(readStatus)

@@ -41,18 +41,43 @@ final class FirestoreService {
     }
 
     // Send a message and update lastMessage fields atomically.
-    func sendMessage(conversationId: String, senderId: String, text: String) async throws {
+    func sendMessage(conversationId: String, senderId: String, text: String, parentMessageId: String? = nil) async throws {
         let convRef = db.collection("conversations").document(conversationId)   // ← declare once
         let msgRef  = convRef.collection("messages").document()
 
+        // Determine threadId: if replying, use parent's threadId or parentId as threadId
+        var threadId: String? = nil
+        if let parentId = parentMessageId {
+            // Get parent message to check if it has a threadId
+            let parentRef = convRef.collection("messages").document(parentId)
+            let parentSnap = try await parentRef.getDocument()
+            if let parentData = parentSnap.data() {
+                // If parent has a threadId, use it; otherwise the parent IS the thread root
+                threadId = (parentData["threadId"] as? String) ?? parentId
+                print("🧵 Replying to thread: parentId=\(parentId), resolved threadId=\(threadId ?? "nil")")
+            }
+        }
+
         // Batch: create message + update lastMessage
         let batch = db.batch()
-        batch.setData([
+        var messageData: [String: Any] = [
             "senderId": senderId,
             "text": text,
             "createdAt": FieldValue.serverTimestamp(),
-            "status": "sent"
-        ], forDocument: msgRef)
+            "status": "sent",
+            "replyCount": 0
+        ]
+        
+        if let parentId = parentMessageId {
+            messageData["parentMessageId"] = parentId
+            messageData["threadId"] = threadId ?? parentId
+            
+            // Increment reply count on parent message
+            let parentRef = convRef.collection("messages").document(threadId ?? parentId)
+            batch.updateData(["replyCount": FieldValue.increment(Int64(1))], forDocument: parentRef)
+        }
+        
+        batch.setData(messageData, forDocument: msgRef)
 
         batch.updateData([
             "lastMessageText": text,
@@ -94,10 +119,108 @@ final class FirestoreService {
                     senderId: (d["senderId"] as? String) ?? "",
                     text: (d["text"] as? String) ?? "",
                     createdAt: (d["createdAt"] as? Timestamp)?.dateValue() ?? Date.distantPast,
-                    status: d["status"] as? String
+                    status: d["status"] as? String,
+                    threadId: d["threadId"] as? String,
+                    parentMessageId: d["parentMessageId"] as? String,
+                    replyCount: (d["replyCount"] as? Int) ?? 0
                 )
             }
             onChange(msgs)
+        }
+    }
+    
+    // Get messages in a thread (including the root message) - one-time fetch
+    func getThreadMessages(conversationId: String, threadId: String) async throws -> [Message] {
+        let convRef = db.collection("conversations").document(conversationId)
+        
+        // Get all messages where threadId matches OR id matches (for the root message)
+        let messagesRef = convRef.collection("messages")
+        
+        // Get the root message
+        let rootSnap = try await messagesRef.document(threadId).getDocument()
+        var messages: [Message] = []
+        
+        if let rootData = rootSnap.data() {
+            messages.append(Message(
+                id: rootSnap.documentID,
+                senderId: (rootData["senderId"] as? String) ?? "",
+                text: (rootData["text"] as? String) ?? "",
+                createdAt: (rootData["createdAt"] as? Timestamp)?.dateValue() ?? Date.distantPast,
+                status: rootData["status"] as? String,
+                threadId: rootData["threadId"] as? String,
+                parentMessageId: rootData["parentMessageId"] as? String,
+                replyCount: (rootData["replyCount"] as? Int) ?? 0
+            ))
+        }
+        
+        // Get all replies in the thread
+        let repliesSnap = try await messagesRef
+            .whereField("threadId", isEqualTo: threadId)
+            .order(by: "createdAt", descending: false)
+            .getDocuments()
+        
+        for doc in repliesSnap.documents {
+            let d = doc.data()
+            messages.append(Message(
+                id: doc.documentID,
+                senderId: (d["senderId"] as? String) ?? "",
+                text: (d["text"] as? String) ?? "",
+                createdAt: (d["createdAt"] as? Timestamp)?.dateValue() ?? Date.distantPast,
+                status: d["status"] as? String,
+                threadId: d["threadId"] as? String,
+                parentMessageId: d["parentMessageId"] as? String,
+                replyCount: (d["replyCount"] as? Int) ?? 0
+            ))
+        }
+        
+        // Sort by createdAt
+        return messages.sorted { ($0.createdAt ?? Date.distantPast) < ($1.createdAt ?? Date.distantPast) }
+    }
+    
+    // Real-time listener for thread messages
+    @discardableResult
+    func listenThreadMessages(conversationId: String, threadId: String, onChange: @escaping ([Message]) -> Void) -> ListenerRegistration {
+        let convRef = db.collection("conversations").document(conversationId)
+        let messagesRef = convRef.collection("messages")
+        
+        // Listen to all messages where threadId matches
+        let query = messagesRef
+            .whereField("threadId", isEqualTo: threadId)
+            .order(by: "createdAt", descending: false)
+        
+        return query.addSnapshotListener { snapshot, error in
+            if let error = error {
+                print("❌ Thread listener error: \(error.localizedDescription)")
+                return
+            }
+            
+            guard let docs = snapshot?.documents else { 
+                print("⚠️ Thread listener: no documents")
+                return 
+            }
+            
+            print("🧵 Thread listener received \(docs.count) messages for thread \(threadId)")
+            
+            var messages: [Message] = []
+            
+            // Include all replies
+            for doc in docs {
+                let d = doc.data()
+                let msg = Message(
+                    id: doc.documentID,
+                    senderId: (d["senderId"] as? String) ?? "",
+                    text: (d["text"] as? String) ?? "",
+                    createdAt: (d["createdAt"] as? Timestamp)?.dateValue() ?? Date.distantPast,
+                    status: d["status"] as? String,
+                    threadId: d["threadId"] as? String,
+                    parentMessageId: d["parentMessageId"] as? String,
+                    replyCount: (d["replyCount"] as? Int) ?? 0
+                )
+                print("  - Message: \(msg.text.prefix(30))... threadId=\(msg.threadId ?? "nil")")
+                messages.append(msg)
+            }
+            
+            onChange(messages)
         }
     }
 
@@ -160,18 +283,15 @@ final class FirestoreService {
             guard let docs = snap?.documents else { return }
             let items: [Conversation] = docs.map { doc in
                 let d = doc.data()
-                let name = d["name"] as? String
-                print("📱 Conversation \(doc.documentID): name = \(name ?? "nil")")
                 return Conversation(
                     id: doc.documentID,
                     members: (d["members"] as? [String]) ?? [],
                     memberCount: (d["memberCount"] as? Int) ?? 0,
-                    name: name,
+                    name: d["name"] as? String,
                     lastMessageText: d["lastMessageText"] as? String,
                     lastMessageAt: (d["lastMessageAt"] as? Timestamp)?.dateValue()
                 )
             }
-            print("📱 Conversations list updated: \(items.count) conversations")
             onChange(items)
         }
     }
@@ -209,7 +329,10 @@ final class FirestoreService {
                 senderId: d["senderId"] as? String ?? "",
                 text: d["text"] as? String ?? "",
                 createdAt: (d["createdAt"] as? Timestamp)?.dateValue(),
-                status: d["status"] as? String
+                status: d["status"] as? String,
+                threadId: d["threadId"] as? String,
+                parentMessageId: d["parentMessageId"] as? String,
+                replyCount: (d["replyCount"] as? Int) ?? 0
             )
         }.reversed())
 

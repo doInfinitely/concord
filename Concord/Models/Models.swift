@@ -27,6 +27,9 @@ struct Message: Identifiable {
     let text: String
     let createdAt: Date?
     let status: String?
+    let threadId: String?       // ID of the thread this message belongs to (nil if not a reply)
+    let parentMessageId: String? // ID of the message being replied to (nil if not a reply)
+    var replyCount: Int          // Number of replies to this message
 }
 
 enum FS {
