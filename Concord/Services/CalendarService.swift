@@ -10,6 +10,10 @@ import Combine
 import EventKit
 import FirebaseAuth
 import FirebaseFirestore
+import FirebaseCore
+import GoogleSignIn
+import GoogleSignInSwift
+import UIKit
 
 // MARK: - Calendar Models
 
@@ -106,7 +110,7 @@ class CalendarService: ObservableObject {
                 id: "apple_\(calendar.calendarIdentifier)",
                 title: calendar.title,
                 type: .apple,
-                color: calendar.cgColor.map { "#\(String(format: "%02X%02X%02X", Int($0.components?[0] ?? 0 * 255), Int($0.components?[1] ?? 0 * 255), Int($0.components?[2] ?? 0 * 255)))" }
+                color: nil // Could extract color from calendar.cgColor if needed
             )
         }
     }
@@ -207,23 +211,104 @@ class CalendarService: ObservableObject {
         }
     }
     
-    /// Initiate Google Calendar OAuth (placeholder - requires GoogleSignIn SDK)
+    /// Initiate Google Calendar OAuth
     func connectGoogleCalendar() async throws {
-        // This would use GoogleSignIn SDK with calendar scope
-        // For now, just mark as connected for UI purposes
-        print("🔵 Google Calendar OAuth would start here")
+        print("🔵 Starting Google Calendar OAuth flow")
         
-        // TODO: Implement actual Google OAuth flow
-        // 1. Configure GoogleSignIn with calendar scopes
-        // 2. Present sign-in UI
-        // 3. Exchange authorization code for tokens
-        // 4. Store refresh token in Firestore (encrypted)
+        // Get the client ID from GoogleService-Info.plist
+        guard let clientID = FirebaseApp.app()?.options.clientID else {
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No client ID found"])
+        }
         
-        // Placeholder:
+        let config = GIDConfiguration(clientID: clientID)
+        GIDSignIn.sharedInstance.configuration = config
+        
+        // Request calendar scope
+        let calendarScope = "https://www.googleapis.com/auth/calendar"
+        
+        // Get the root view controller
+        guard let windowScene = await UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootViewController = await windowScene.windows.first?.rootViewController else {
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No root view controller"])
+        }
+        
+        // Sign in with calendar scope
+        let result = try await GIDSignIn.sharedInstance.signIn(
+            withPresenting: rootViewController,
+            hint: nil,
+            additionalScopes: [calendarScope]
+        )
+        
+        let accessToken = result.user.accessToken.tokenString
+        
+        print("✅ Google Calendar OAuth successful")
+        
+        // Store the refresh token in Firestore (for server-side access)
+        let refreshToken = result.user.refreshToken.tokenString
+        guard let uid = Auth.auth().currentUser?.uid else {
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No Firebase user"])
+        }
+        
+        try await db.collection("users").document(uid).setData([
+            "googleCalendarRefreshToken": refreshToken,
+            "googleCalendarConnected": true
+        ], merge: true)
+        
+        // Fetch calendars
+        let calendars = try await fetchGoogleCalendars(accessToken: accessToken)
+        
         await MainActor.run {
             isGoogleCalendarConnected = true
+            
+            // Add Google calendars to availableCalendars
+            let googleCalendarInfos = calendars.map { calendar in
+                CalendarInfo(
+                    id: "google_\(calendar.id)",
+                    title: calendar.summary,
+                    type: .google,
+                    color: nil
+                )
+            }
+            
+            // Remove old Google calendars and add new ones
+            availableCalendars.removeAll { $0.type == .google }
+            availableCalendars.append(contentsOf: googleCalendarInfos)
+            
+            print("✅ Loaded \(googleCalendarInfos.count) Google calendars")
         }
+        
         try await saveCalendarStatus(apple: nil, google: true)
+    }
+    
+    /// Fetch Google Calendar list
+    private func fetchGoogleCalendars(accessToken: String) async throws -> [GoogleCalendarListItem] {
+        let url = URL(string: "https://www.googleapis.com/calendar/v3/users/me/calendarList")!
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        
+        print("🔵 Fetching Google calendars with token: \(accessToken.prefix(20))...")
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
+        }
+        
+        print("🔵 Google Calendar API response status: \(httpResponse.statusCode)")
+        
+        if httpResponse.statusCode != 200 {
+            if let errorString = String(data: data, encoding: .utf8) {
+                print("❌ Google Calendar API error response: \(errorString)")
+            }
+            throw NSError(domain: "CalendarService", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Failed to fetch calendars (status \(httpResponse.statusCode))"])
+        }
+        
+        let decoder = JSONDecoder()
+        let calendarList = try decoder.decode(GoogleCalendarListResponse.self, from: data)
+        
+        print("✅ Successfully fetched \(calendarList.items.count) Google calendars")
+        
+        return calendarList.items
     }
     
     /// Disconnect Google Calendar
@@ -238,6 +323,83 @@ class CalendarService: ObservableObject {
         try await db.collection("users").document(uid).updateData([
             "googleCalendarRefreshToken": FieldValue.delete()
         ])
+    }
+    
+    /// Create event in Google Calendar
+    func createGoogleCalendarEvent(
+        calendarId: String,
+        title: String,
+        startDate: Date,
+        duration: TimeInterval,
+        location: String?,
+        notes: String?,
+        attendees: [String]?
+    ) async throws -> String {
+        let googleCalendarId = String(calendarId.dropFirst(7)) // Remove "google_" prefix
+        
+        // Get access token
+        guard let accessToken = GIDSignIn.sharedInstance.currentUser?.accessToken.tokenString else {
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No Google access token"])
+        }
+        
+        // Format dates for Google Calendar API (ISO8601 with timezone)
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone.current
+        let startDateString = formatter.string(from: startDate)
+        let endDate = startDate.addingTimeInterval(duration)
+        let endDateString = formatter.string(from: endDate)
+        
+        // Separate valid emails from names
+        let validEmails = attendees?.filter { $0.contains("@") && $0.contains(".") } ?? []
+        let nonEmailAttendees = attendees?.filter { !($0.contains("@") && $0.contains(".")) } ?? []
+        
+        // Add non-email attendees to notes
+        var finalNotes = notes ?? ""
+        if !nonEmailAttendees.isEmpty {
+            let attendeeText = "\n\nAttendees: " + nonEmailAttendees.joined(separator: ", ")
+            finalNotes = finalNotes + attendeeText
+        }
+        
+        // Build request
+        var eventRequest = GoogleCalendarEventRequest(
+            summary: title,
+            start: GoogleCalendarEventTime(
+                dateTime: startDateString,
+                timeZone: TimeZone.current.identifier
+            ),
+            end: GoogleCalendarEventTime(
+                dateTime: endDateString,
+                timeZone: TimeZone.current.identifier
+            ),
+            location: location,
+            description: finalNotes.isEmpty ? nil : finalNotes,
+            attendees: validEmails.isEmpty ? nil : validEmails.map { GoogleCalendarAttendee(email: $0) }
+        )
+        
+        // Make API request
+        let url = URL(string: "https://www.googleapis.com/calendar/v3/calendars/\(googleCalendarId)/events")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let encoder = JSONEncoder()
+        request.httpBody = try encoder.encode(eventRequest)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            if let errorString = String(data: data, encoding: .utf8) {
+                print("❌ Google Calendar API error: \(errorString)")
+            }
+            throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create Google Calendar event"])
+        }
+        
+        let decoder = JSONDecoder()
+        let eventResponse = try decoder.decode(GoogleCalendarEventResponse.self, from: data)
+        
+        print("✅ Created Google Calendar event: \(title)")
+        return eventResponse.id
     }
     
     // MARK: - Helper Methods
@@ -270,10 +432,39 @@ class CalendarService: ObservableObject {
             }
             
             // Load available calendars if connected
+            var allCalendars: [CalendarInfo] = []
+            
             if isAppleCalendarConnected {
-                await MainActor.run {
-                    availableCalendars = getAppleCalendars()
+                allCalendars.append(contentsOf: getAppleCalendars())
+            }
+            
+            // Load Google calendars if connected
+            if googleConnected {
+                do {
+                    if GIDSignIn.sharedInstance.hasPreviousSignIn() {
+                        try await GIDSignIn.sharedInstance.restorePreviousSignIn()
+                        
+                        if let accessToken = GIDSignIn.sharedInstance.currentUser?.accessToken.tokenString {
+                            let googleCalendars = try await fetchGoogleCalendars(accessToken: accessToken)
+                            let googleCalendarInfos = googleCalendars.map { calendar in
+                                CalendarInfo(
+                                    id: "google_\(calendar.id)",
+                                    title: calendar.summary,
+                                    type: .google,
+                                    color: nil
+                                )
+                            }
+                            allCalendars.append(contentsOf: googleCalendarInfos)
+                            print("✅ Loaded \(googleCalendarInfos.count) Google calendars")
+                        }
+                    }
+                } catch {
+                    print("⚠️ Failed to restore Google Sign-In: \(error)")
                 }
+            }
+            
+            await MainActor.run {
+                availableCalendars = allCalendars
             }
             
         } catch {
@@ -367,5 +558,41 @@ class CalendarService: ObservableObject {
         
         return eventData
     }
+}
+
+// MARK: - Google Calendar API Models
+
+struct GoogleCalendarListResponse: Codable {
+    let items: [GoogleCalendarListItem]
+}
+
+struct GoogleCalendarListItem: Codable {
+    let id: String
+    let summary: String
+    let primary: Bool?
+    let accessRole: String?
+}
+
+struct GoogleCalendarEventRequest: Codable {
+    let summary: String
+    let start: GoogleCalendarEventTime
+    let end: GoogleCalendarEventTime
+    let location: String?
+    let description: String?
+    let attendees: [GoogleCalendarAttendee]?
+}
+
+struct GoogleCalendarEventTime: Codable {
+    let dateTime: String
+    let timeZone: String?
+}
+
+struct GoogleCalendarAttendee: Codable {
+    let email: String
+}
+
+struct GoogleCalendarEventResponse: Codable {
+    let id: String
+    let htmlLink: String
 }
 

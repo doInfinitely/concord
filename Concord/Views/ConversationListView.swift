@@ -760,11 +760,18 @@ struct CreateEventView: View {
                         duration: eventData.duration,
                         location: eventData.location,
                         notes: eventData.notes,
-                        attendees: eventData.attendees
+                        attendees: eventData.attendees ?? []
                     )
                 } else {
-                    // Google Calendar creation would go here
-                    print("🔵 Google Calendar event creation not yet implemented")
+                    _ = try await calendarService.createGoogleCalendarEvent(
+                        calendarId: calendar.id,
+                        title: eventData.title,
+                        startDate: date,
+                        duration: eventData.duration,
+                        location: eventData.location,
+                        notes: eventData.notes,
+                        attendees: eventData.attendees
+                    )
                 }
                 
                 await MainActor.run {
