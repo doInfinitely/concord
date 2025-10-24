@@ -844,9 +844,9 @@ private struct AnimatedPresenceDot: View {
     }
     
     private func startAnimations() {
-        // Animate each dash independently with random delays
+        // Animate each dash independently with random delays (more frequent)
         for i in 0..<8 {
-            let randomDelay = Double.random(in: 0...2)
+            let randomDelay = Double.random(in: 0...1)
             
             Task {
                 try? await Task.sleep(nanoseconds: UInt64(randomDelay * 1_000_000_000))
@@ -880,9 +880,9 @@ private struct AnimatedPresenceDot: View {
             dashOffsets[index] = 1.0
             try? await Task.sleep(nanoseconds: 100_000_000) // Brief pause at end
             
-            // Reset and wait random time before next dash
+            // Reset and wait random time before next dash (more frequent)
             dashOffsets[index] = 0.0
-            let randomWait = Double.random(in: 0.5...2.0)
+            let randomWait = Double.random(in: 0.2...0.8)
             try? await Task.sleep(nanoseconds: UInt64(randomWait * 1_000_000_000))
         }
     }
