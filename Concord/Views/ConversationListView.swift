@@ -173,6 +173,9 @@ private struct ConversationRow: View {
                             .bold()
                             .foregroundStyle(.black)
                     )
+                
+                let _ = print("🎨 Rendering avatar for \(convo.id): online=\(online), memberCount=\(convo.memberCount), showing indicator=\(online && convo.memberCount == 2)")
+                
                 if online && convo.memberCount == 2 {
                     AnimatedPresenceDot()
                         .offset(x: 4, y: 4)
@@ -221,8 +224,11 @@ private struct ConversationRow: View {
         .contentShape(Rectangle())
         .padding(.vertical, 6)
         .onAppear {
+            print("👁️ ConversationRow onAppear for \(convo.id)")
             if convo.memberCount == 2, let me = myUid,
                let other = convo.members.first(where: { $0 != me }) {
+                print("🔍 Setting up presence listener for DM with \(other)")
+                
                 // Load other user's display name
                 Task {
                     do {
@@ -244,21 +250,44 @@ private struct ConversationRow: View {
                 }
                 
                 // Set up presence listener
+                print("📡 Creating presence listener for \(other)")
                 presenceListener = Firestore.firestore()
                     .collection("users").document(other)
-                    .addSnapshotListener { snap, _ in
-                        if let ts = (snap?.data()?["lastSeen"] as? Timestamp)?.dateValue() {
-                            DispatchQueue.main.async {
-                                let window = PresenceService.onlineWindow
-                                online = Date().timeIntervalSince(ts) < window
+                    .addSnapshotListener { snap, error in
+                        if let error = error {
+                            print("❌ Presence listener error for \(other): \(error)")
+                            return
+                        }
+                        
+                        print("👀 Presence snapshot for \(other): exists=\(snap?.exists ?? false)")
+                        if let data = snap?.data() {
+                            print("   Data keys: \(data.keys.joined(separator: ", "))")
+                            if let ts = data["lastSeen"] as? Timestamp {
+                                let date = ts.dateValue()
+                                let age = Date().timeIntervalSince(date)
+                                print("   lastSeen: \(date) (age: \(age)s)")
+                                DispatchQueue.main.async {
+                                    let window = PresenceService.onlineWindow
+                                    let isOnline = age < window
+                                    print("   Setting online=\(isOnline) (window=\(window)s)")
+                                    online = isOnline
+                                }
+                            } else {
+                                print("   No lastSeen timestamp found")
+                                DispatchQueue.main.async { online = false }
                             }
                         } else {
+                            print("   No data in snapshot")
                             DispatchQueue.main.async { online = false }
                         }
                     }
+                print("✅ Presence listener created for \(other)")
+            } else {
+                print("⏭️ Skipping presence for conversation \(convo.id) (memberCount=\(convo.memberCount))")
             }
         }
         .onDisappear {
+            print("👋 ConversationRow onDisappear for \(convo.id)")
             presenceListener?.remove()
             presenceListener = nil
         }
@@ -870,11 +899,11 @@ private struct AnimatedPresenceDot: View {
             let startTime = Date()
             let duration: TimeInterval = 0.6
             
-            // Smoothly increment progress over duration
+            // Smoothly increment progress over duration (30fps for smoother performance)
             while Date().timeIntervalSince(startTime) < duration {
                 let elapsed = Date().timeIntervalSince(startTime)
                 dashOffsets[index] = min(elapsed / duration, 1.0)
-                try? await Task.sleep(nanoseconds: 16_000_000) // ~60fps update
+                try? await Task.sleep(nanoseconds: 33_000_000) // ~30fps update
             }
             
             dashOffsets[index] = 1.0
@@ -894,20 +923,20 @@ private struct AnimatedPresenceDot: View {
             let targetWiggle = Double.random(in: -5...5)
             let startWiggle = angleWiggles[index]
             let startTime = Date()
-            let duration: TimeInterval = Double.random(in: 0.3...0.8) // Random duration for organic motion
+            let duration: TimeInterval = Double.random(in: 0.4...0.7) // More consistent duration
             
-            // Smoothly interpolate to target angle
+            // Smoothly interpolate to target angle (30fps for smoother performance)
             while Date().timeIntervalSince(startTime) < duration {
                 let elapsed = Date().timeIntervalSince(startTime)
                 let progress = min(elapsed / duration, 1.0)
                 angleWiggles[index] = startWiggle + (targetWiggle - startWiggle) * progress
-                try? await Task.sleep(nanoseconds: 16_000_000) // ~60fps update
+                try? await Task.sleep(nanoseconds: 33_000_000) // ~30fps update
             }
             
             angleWiggles[index] = targetWiggle
             
-            // Brief pause before next wiggle
-            try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 0.1...0.3) * 1_000_000_000))
+            // More consistent pause before next wiggle
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s fixed pause
         }
     }
 }

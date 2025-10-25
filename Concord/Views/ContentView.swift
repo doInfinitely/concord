@@ -31,6 +31,14 @@ struct ContentView: View {
                             await notifications.saveFCMToken(for: uid)
                         }
                     }
+                    .onAppear {
+                        // Start presence service when user is signed in (runs once on initial load)
+                        if let uid = auth.uid {
+                            print("🟢 Starting presence service on appear (uid: \(uid))")
+                            presence.start(uid: uid)
+                            presence.pingOnce(uid: uid)
+                        }
+                    }
             } else {
                 LoginView()
             }
@@ -41,9 +49,11 @@ struct ContentView: View {
             guard let uid = auth.uid else { return }
             switch newPhase {
             case .active:
+                print("🟢 App became active, starting presence")
                 presence.start(uid: uid)
                 presence.pingOnce(uid: uid)
             case .inactive, .background:
+                print("⏸️ App became \(newPhase), keeping presence running")
                 break
             @unknown default:
                 break

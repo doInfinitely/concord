@@ -15,14 +15,16 @@ final class PresenceService {
 
     func start(uid: String, intervalSeconds: UInt64 = 25) {
         stop() // in case it was already running
+        print("🟢 Starting presence service for \(uid) (interval: \(intervalSeconds)s)")
         loopTask = Task.detached { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 do {
                     try await self.db.collection("users").document(uid)
                         .setData(["lastSeen": FieldValue.serverTimestamp()], merge: true)
+                    print("💚 Presence ping sent for \(uid)")
                 } catch {
-                    // optional: print(error.localizedDescription)
+                    print("❌ Presence ping failed for \(uid): \(error.localizedDescription)")
                 }
                 try? await Task.sleep(nanoseconds: intervalSeconds * 1_000_000_000)
             }
@@ -30,15 +32,22 @@ final class PresenceService {
     }
 
     func stop() {
+        print("🔴 Stopping presence service")
         loopTask?.cancel()
         loopTask = nil
     }
 
     /// Handy when app becomes active: send one immediate ping.
     func pingOnce(uid: String) {
+        print("🟡 Sending one-time presence ping for \(uid)")
         Task { [db] in
-            try? await db.collection("users").document(uid)
-                .setData(["lastSeen": FieldValue.serverTimestamp()], merge: true)
+            do {
+                try await db.collection("users").document(uid)
+                    .setData(["lastSeen": FieldValue.serverTimestamp()], merge: true)
+                print("💛 One-time presence ping sent for \(uid)")
+            } catch {
+                print("❌ One-time presence ping failed for \(uid): \(error.localizedDescription)")
+            }
         }
     }
 }
