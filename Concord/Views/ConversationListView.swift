@@ -39,26 +39,31 @@ struct ConversationListView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                // Main content
-                Group {
-                    if conversations.isEmpty {
-                        ContentUnavailableView(
-                            "No conversations yet",
-                            systemImage: "bubble.left.and.bubble.right",
-                            description: Text("Start a DM or create a group to get chatting.")
-                        )
-                    } else {
-                        List(conversations, id: \.id, selection: $selection) { convo in
-                            Button {
-                                selection = convo
-                            } label: {
-                                ConversationRow(convo: convo, myUid: auth.uid)
+            ZStack {
+                // Background
+                Color(red: 242/255, green: 242/255, blue: 242/255)
+                    .ignoresSafeArea()
+                
+                VStack(spacing: 0) {
+                    // Main content
+                    Group {
+                        if conversations.isEmpty {
+                            ContentUnavailableView(
+                                "No conversations yet",
+                                systemImage: "bubble.left.and.bubble.right",
+                                description: Text("Start a DM or create a group to get chatting.")
+                            )
+                        } else {
+                            List(conversations, id: \.id, selection: $selection) { convo in
+                                Button {
+                                    selection = convo
+                                } label: {
+                                    ConversationRow(convo: convo, myUid: auth.uid)
+                                }
                             }
+                            .listStyle(.insetGrouped)
                         }
-                        .listStyle(.insetGrouped)
                     }
-                }
                 
                 // Search bar at bottom
                 HStack(spacing: 12) {
@@ -98,13 +103,14 @@ struct ConversationListView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(Color(.systemBackground))
-                .overlay(
-                    Divider(),
-                    alignment: .top
-                )
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(Color(.systemBackground))
+                    .overlay(
+                        Divider(),
+                        alignment: .top
+                    )
+                }
             }
             .navigationTitle("Concord")
             .toolbar {
@@ -1040,39 +1046,32 @@ struct CreateEventView: View {
 
 // MARK: - Animated Presence Dot
 private struct AnimatedPresenceDot: View {
-    @State private var dashOffsets: [Double] = Array(repeating: 0.0, count: 8)
-    @State private var angleWiggles: [Double] = Array(repeating: 0.0, count: 8)
+    @State private var rayLengths: [Double] = Array(repeating: 1.0, count: 8)
     
     var body: some View {
         TimelineView(.animation) { timeline in
             ZStack {
-                // Radiating lines with animated dashes
+                // Radiating lines that oscillate in and out
                 ForEach(0..<8) { i in
-                    let progress = dashOffsets[i]
-                    let angleWiggle = angleWiggles[i]
+                    let lengthScale = rayLengths[i]
+                    let baseHeight = 8.0
+                    let currentHeight = baseHeight * lengthScale
+                    let baseOffset = 10.0
+                    let currentOffset = baseOffset * lengthScale
                     
-                    ZStack {
-                        // Black background ray with gradient to white at tip
-                        LinearGradient(
-                            gradient: Gradient(stops: [
-                                .init(color: .black, location: 0.0),
-                                .init(color: .black, location: 0.5),
-                                .init(color: .white, location: 1.0)
-                            ]),
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .frame(width: 2, height: 8)
-                        .offset(y: -10)
-                        
-                        // White dash traveling outward (always rendered, opacity controls visibility)
-                        Rectangle()
-                            .fill(.white)
-                            .frame(width: 2, height: 3)
-                            .offset(y: -6 - (progress * 8))
-                            .opacity(progress < 1.0 ? 1.0 : 0.0)
-                    }
-                    .rotationEffect(.degrees(Double(i) * 45 + angleWiggle))
+                    // Black ray with gradient to white at tip
+                    LinearGradient(
+                        gradient: Gradient(stops: [
+                            .init(color: .black, location: 0.0),
+                            .init(color: .black, location: 0.5),
+                            .init(color: .white, location: 1.0)
+                        ]),
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(width: 2, height: currentHeight)
+                    .offset(y: -currentOffset)
+                    .rotationEffect(.degrees(Double(i) * 45))
                 }
                 
                 // White circle with black border
@@ -1085,80 +1084,53 @@ private struct AnimatedPresenceDot: View {
                     .frame(width: 12, height: 12)
             }
             .onAppear {
-                // Initialize with random offsets
-                dashOffsets = (0..<8).map { _ in Double.random(in: 0...1) }
-                angleWiggles = (0..<8).map { _ in Double.random(in: -5...5) }
-                startAnimations()
-                startWiggleAnimations()
+                // Initialize with random phases
+                rayLengths = (0..<8).map { _ in Double.random(in: 0.8...1.2) }
+                startRadialAnimations()
             }
         }
     }
     
-    private func startAnimations() {
-        // Animate each dash independently with random delays (more frequent)
+    private func startRadialAnimations() {
+        // Animate each ray independently with random delays
         for i in 0..<8 {
             let randomDelay = Double.random(in: 0...1)
             
             Task {
                 try? await Task.sleep(nanoseconds: UInt64(randomDelay * 1_000_000_000))
-                await animateDash(index: i)
-            }
-        }
-    }
-    
-    private func startWiggleAnimations() {
-        // Animate each ray's angle independently
-        for i in 0..<8 {
-            Task {
-                await animateWiggle(index: i)
+                await animateRay(index: i)
             }
         }
     }
     
     @MainActor
-    private func animateDash(index: Int) async {
+    private func animateRay(index: Int) async {
         while true {
+            // Oscillate between 0.7 and 1.3 (70% to 130% of base length)
+            let minLength = 0.7
+            let maxLength = 1.3
+            let currentLength = rayLengths[index]
+            
+            // Determine next target (alternate between extending and contracting)
+            let targetLength = currentLength < 1.0 ? maxLength : minLength
+            
             let startTime = Date()
-            let duration: TimeInterval = 0.6
+            let duration: TimeInterval = Double.random(in: 0.6...1.0)
             
-            // Smoothly increment progress over duration (30fps for smoother performance)
-            while Date().timeIntervalSince(startTime) < duration {
-                let elapsed = Date().timeIntervalSince(startTime)
-                dashOffsets[index] = min(elapsed / duration, 1.0)
-                try? await Task.sleep(nanoseconds: 33_000_000) // ~30fps update
-            }
-            
-            dashOffsets[index] = 1.0
-            try? await Task.sleep(nanoseconds: 100_000_000) // Brief pause at end
-            
-            // Reset and wait random time before next dash (more frequent)
-            dashOffsets[index] = 0.0
-            let randomWait = Double.random(in: 0.2...0.8)
-            try? await Task.sleep(nanoseconds: UInt64(randomWait * 1_000_000_000))
-        }
-    }
-    
-    @MainActor
-    private func animateWiggle(index: Int) async {
-        while true {
-            // Random target angle wiggle between -5 and +5 degrees
-            let targetWiggle = Double.random(in: -5...5)
-            let startWiggle = angleWiggles[index]
-            let startTime = Date()
-            let duration: TimeInterval = Double.random(in: 0.4...0.7) // More consistent duration
-            
-            // Smoothly interpolate to target angle (30fps for smoother performance)
+            // Smoothly interpolate to target length (30fps)
             while Date().timeIntervalSince(startTime) < duration {
                 let elapsed = Date().timeIntervalSince(startTime)
                 let progress = min(elapsed / duration, 1.0)
-                angleWiggles[index] = startWiggle + (targetWiggle - startWiggle) * progress
-                try? await Task.sleep(nanoseconds: 33_000_000) // ~30fps update
+                // Use ease-in-out for smoother oscillation
+                let easedProgress = (1 - cos(progress * .pi)) / 2
+                rayLengths[index] = currentLength + (targetLength - currentLength) * easedProgress
+                try? await Task.sleep(nanoseconds: 33_000_000) // ~30fps
             }
             
-            angleWiggles[index] = targetWiggle
+            rayLengths[index] = targetLength
             
-            // More consistent pause before next wiggle
-            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s fixed pause
+            // Brief pause at each extreme
+            try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 0.1...0.3) * 1_000_000_000))
         }
     }
 }
