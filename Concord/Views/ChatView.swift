@@ -530,6 +530,9 @@ struct ChatView: View {
                 continue
             }
             
+            // Mark as processed IMMEDIATELY to prevent duplicate processing
+            processedMessageIds.insert(message.id)
+            
             print("📅 Proactive: Message from \(message.senderId): '\(message.text.prefix(50))...'")
             
             // Skip AI messages
@@ -537,9 +540,6 @@ struct ChatView: View {
                 print("📅 Proactive: Skipping (AI message)")
                 continue
             }
-            
-            // Mark as processed
-            processedMessageIds.insert(message.id)
             
             // Check MY calendar for conflicts with ANY meeting proposal
             // (doesn't matter who sent it - if there's a conflict, I should know)
@@ -980,9 +980,13 @@ struct ChatView: View {
                             
                             // Show notifications for messages from other users
                             if !newMessagesFromOthers.isEmpty {
+                                // Mark as notified IMMEDIATELY to prevent duplicate notifications
+                                for message in newMessagesFromOthers {
+                                    notifiedMessageIds.insert(message.id)
+                                }
+                                
                                 Task {
                                     for message in newMessagesFromOthers {
-                                        notifiedMessageIds.insert(message.id)
                                         await showNotificationForNewMessage(message)
                                     }
                                 }
