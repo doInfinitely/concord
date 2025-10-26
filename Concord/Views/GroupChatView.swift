@@ -64,54 +64,68 @@ struct CreateGroupChatView: View {
                             ProgressView()
                             Spacer()
                         }
+                        .frame(height: 80)
                     } else if dmContacts.isEmpty {
                         Text("No DM contacts found")
                             .foregroundStyle(.secondary)
                             .font(.caption)
+                            .frame(height: 80)
                     } else {
-                        ForEach(dmContacts) { contact in
-                            Button {
-                                toggleContact(contact.id)
-                            } label: {
-                                HStack {
-                                    // Avatar
-                                    Circle()
-                                        .fill(Color.gray.opacity(0.2))
-                                        .frame(width: 36, height: 36)
-                                        .overlay(
-                                            Text(contact.initials)
-                                                .font(.caption)
-                                                .fontWeight(.semibold)
-                                                .foregroundStyle(.black)
-                                        )
-                                    
-                                    // Name and email
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(contact.displayName)
-                                            .font(.body)
-                                            .foregroundStyle(.primary)
-                                        
-                                        if let email = contact.email {
-                                            Text(email)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(dmContacts) { contact in
+                                    Button {
+                                        toggleContact(contact.id)
+                                    } label: {
+                                        HStack {
+                                            // Avatar
+                                            Circle()
+                                                .fill(Color.gray.opacity(0.2))
+                                                .frame(width: 36, height: 36)
+                                                .overlay(
+                                                    Text(contact.initials)
+                                                        .font(.caption)
+                                                        .fontWeight(.semibold)
+                                                        .foregroundStyle(.black)
+                                                )
+                                            
+                                            // Name and email
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(contact.displayName)
+                                                    .font(.body)
+                                                    .foregroundStyle(.primary)
+                                                
+                                                if let email = contact.email {
+                                                    Text(email)
+                                                        .font(.caption)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                            }
+                                            
+                                            Spacer()
+                                            
+                                            // Checkmark if selected
+                                            if selectedMembers.contains(contact.id) {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .foregroundStyle(.green)
+                                            } else {
+                                                Image(systemName: "circle")
+                                                    .foregroundStyle(.gray)
+                                            }
                                         }
+                                        .padding(.vertical, 8)
+                                        .padding(.horizontal, 4)
                                     }
+                                    .buttonStyle(.plain)
                                     
-                                    Spacer()
-                                    
-                                    // Checkmark if selected
-                                    if selectedMembers.contains(contact.id) {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(.green)
-                                    } else {
-                                        Image(systemName: "circle")
-                                            .foregroundStyle(.gray)
+                                    if contact.id != dmContacts.last?.id {
+                                        Divider()
+                                            .padding(.leading, 48)
                                     }
                                 }
                             }
-                            .buttonStyle(.plain)
                         }
+                        .frame(maxHeight: 250)
                     }
                 }
                 
