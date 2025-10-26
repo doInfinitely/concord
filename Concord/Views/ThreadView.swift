@@ -24,6 +24,8 @@ struct ThreadOverlayView: View {
     @State private var aiLoadingForMessage: String? = nil
     @State private var showCreateEvent = false
     @State private var extractedEvent = ExtractedEventData()
+    @State private var showRSVPList = false
+    @State private var selectedRSVPMessage: Message?
     
     private let store = FirestoreService()
     private let aiService = AIService()
@@ -88,6 +90,12 @@ struct ThreadOverlayView: View {
                                 onAIAction: { message, action in
                                     handleAIAction(message: message, action: action)
                                 },
+                                onSetRSVP: { message, status in
+                                    setRSVP(message: message, status: status)
+                                },
+                                onShowRSVPList: { message in
+                                    showRSVPList(for: message)
+                                },
                                 showCreateEvent: $showCreateEvent,
                                 extractedEvent: $extractedEvent
                             )
@@ -105,6 +113,12 @@ struct ThreadOverlayView: View {
                                     aiLoadingForMessage: aiLoadingForMessage,
                                     onAIAction: { message, action in
                                         handleAIAction(message: message, action: action)
+                                    },
+                                    onSetRSVP: { message, status in
+                                        setRSVP(message: message, status: status)
+                                    },
+                                    onShowRSVPList: { message in
+                                        showRSVPList(for: message)
                                     },
                                     showCreateEvent: $showCreateEvent,
                                     extractedEvent: $extractedEvent
@@ -168,8 +182,20 @@ struct ThreadOverlayView: View {
         .sheet(isPresented: $showCreateEvent) {
             CreateEventView(
                 calendarService: calendarService,
-                eventData: $extractedEvent
+                eventData: $extractedEvent,
+                conversationId: conversationId,
+                onEventCreated: { title, date in
+                    sendEventAnnouncementMessage(title: title, date: date)
+                }
             )
+        }
+        .sheet(isPresented: $showRSVPList) {
+            if let message = selectedRSVPMessage {
+                RSVPListView(
+                    conversationId: conversationId,
+                    messageId: message.id
+                )
+            }
         }
     }
     
@@ -228,6 +254,74 @@ struct ThreadOverlayView: View {
         }
     }
     
+    private func sendEventAnnouncementMessage(title: String, date: Date) {
+        print("📣 [ThreadView] sendEventAnnouncementMessage called with title: \(title), date: \(date)")
+        
+        Task {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateStyle = .medium
+            dateFormatter.timeStyle = .short
+            
+            let messageText = """
+            **Calendar Event Created**
+            
+            **\(title)**
+            \(dateFormatter.string(from: date))
+            
+            Long-press this message to RSVP.
+            """
+            
+            print("📣 [ThreadView] Attempting to send event announcement to conversation: \(conversationId)")
+            
+            do {
+                let docRef = try await Firestore.firestore()
+                    .collection("conversations")
+                    .document(conversationId)
+                    .collection("messages")
+                    .addDocument(data: [
+                        "senderId": Auth.auth().currentUser?.uid ?? "",
+                        "text": messageText,
+                        "createdAt": FieldValue.serverTimestamp(),
+                        "status": "sent",
+                        "isAI": true,
+                        "aiAction": "event_announcement",
+                        "eventTitle": title,
+                        "eventDate": Timestamp(date: date),
+                        "rsvpData": [:] as [String: String],
+                        "replyCount": 0
+                    ])
+                
+                print("✅ [ThreadView] Event announcement sent successfully! Doc ID: \(docRef.documentID)")
+            } catch {
+                print("❌ [ThreadView] Error sending event announcement: \(error)")
+                print("❌ [ThreadView] Error details: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func setRSVP(message: Message, status: RSVPStatus) {
+        guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        Task {
+            do {
+                try await store.setRSVP(
+                    conversationId: conversationId,
+                    messageId: message.id,
+                    userId: userId,
+                    status: status.rawValue
+                )
+                print("✅ [ThreadView] RSVP set to \(status.rawValue)")
+            } catch {
+                print("❌ [ThreadView] Error setting RSVP: \(error)")
+            }
+        }
+    }
+    
+    private func showRSVPList(for message: Message) {
+        selectedRSVPMessage = message
+        showRSVPList = true
+    }
+    
     private func sendReply() {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         let trimmed = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -270,6 +364,8 @@ private struct ThreadMessageBubble: View {
     let isLastMessage: Bool
     let aiLoadingForMessage: String?
     let onAIAction: (Message, AIAction) -> Void
+    let onSetRSVP: (Message, RSVPStatus) -> Void
+    let onShowRSVPList: (Message) -> Void
     @Binding var showCreateEvent: Bool
     @Binding var extractedEvent: ExtractedEventData
     
@@ -281,6 +377,8 @@ private struct ThreadMessageBubble: View {
             return AnyView(AIThreadMessageBubble(
                 message: message,
                 aiLoadingForMessage: aiLoadingForMessage,
+                onSetRSVP: onSetRSVP,
+                onShowRSVPList: onShowRSVPList,
                 showCreateEvent: $showCreateEvent,
                 extractedEvent: $extractedEvent
             ))
@@ -441,6 +539,8 @@ private struct ThreadMessageBubble: View {
 private struct AIThreadMessageBubble: View {
     let message: Message
     let aiLoadingForMessage: String?
+    let onSetRSVP: (Message, RSVPStatus) -> Void
+    let onShowRSVPList: (Message) -> Void
     @Binding var showCreateEvent: Bool
     @Binding var extractedEvent: ExtractedEventData
     
@@ -573,6 +673,21 @@ private struct AIThreadMessageBubble: View {
                                     .foregroundStyle(.white)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
+                        } else if message.aiAction == "event_announcement" {
+                            // Event announcement with animated header
+                            let bodyText: String = {
+                                var text = message.text
+                                    .replacingOccurrences(of: "**Calendar Event Created**", with: "")
+                                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }()
+                            
+                            WalkingBumpsText(text: "Calendar Event Created", color: .white)
+                                .font(.headline)
+                                .fontWeight(.bold)
+                            
+                            Text(parseMarkdown(bodyText))
+                                .foregroundStyle(.white)
+                                .fixedSize(horizontal: false, vertical: true)
                         } else {
                             // Regular AI message
                             Text(parseMarkdown(message.text))
@@ -592,6 +707,46 @@ private struct AIThreadMessageBubble: View {
                 .background(Color.black)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .frame(maxWidth: 280)
+                .contextMenu {
+                    // RSVP menu for calendar event announcements
+                    if message.aiAction == "event_announcement" {
+                        Menu("RSVP") {
+                            Button {
+                                onSetRSVP(message, .yes)
+                            } label: {
+                                Label("Yes", systemImage: "checkmark.circle.fill")
+                            }
+                            
+                            Button {
+                                onSetRSVP(message, .no)
+                            } label: {
+                                Label("No", systemImage: "xmark.circle.fill")
+                            }
+                            
+                            Button {
+                                onSetRSVP(message, .maybe)
+                            } label: {
+                                Label("Maybe", systemImage: "questionmark.circle.fill")
+                            }
+                        }
+                    }
+                }
+                
+                // RSVP count badge for calendar event announcements - ALWAYS show for event announcements
+                if message.aiAction == "event_announcement" {
+                    Button {
+                        print("🔘 [ThreadView] Tapping RSVP badge for message \(message.id) with count: \(message.rsvpCount)")
+                        onShowRSVPList(message)
+                    } label: {
+                        WaveText(
+                            text: message.rsvpCount == 0 ? "RSVP" : 
+                                  message.rsvpCount == 1 ? "1 RSVP" : "\(message.rsvpCount) RSVPs"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.white)
+                        .padding(.top, 2)
+                    }
+                }
             }
             
             Spacer()

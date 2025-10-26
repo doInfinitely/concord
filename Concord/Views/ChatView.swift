@@ -69,6 +69,10 @@ struct ChatView: View {
     
     // Track processed messages to avoid duplicates
     @State private var processedMessageIds = Set<String>()
+    
+    // RSVP Tracking
+    @State private var showRSVPList = false
+    @State private var selectedRSVPMessage: Message?
 
     private let typingInactivityGrace: TimeInterval = 0.05  // wait this long after last event
     private let typingMinVisible: TimeInterval = 0.9       // ensure UI stays visible at least this long
@@ -398,6 +402,74 @@ struct ChatView: View {
             // Simple fallback
             return "Meeting"
         }
+    }
+    
+    private func sendEventAnnouncementMessage(title: String, date: Date) {
+        print("📣 sendEventAnnouncementMessage called with title: \(title), date: \(date)")
+        
+        Task {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateStyle = .medium
+            dateFormatter.timeStyle = .short
+            
+            let messageText = """
+            **Calendar Event Created**
+            
+            **\(title)**
+            \(dateFormatter.string(from: date))
+            
+            Long-press this message to RSVP.
+            """
+            
+            print("📣 Attempting to send event announcement to conversation: \(conversationId)")
+            
+            do {
+                let docRef = try await Firestore.firestore()
+                    .collection("conversations")
+                    .document(conversationId)
+                    .collection("messages")
+                    .addDocument(data: [
+                        "senderId": Auth.auth().currentUser?.uid ?? "",
+                        "text": messageText,
+                        "createdAt": FieldValue.serverTimestamp(),
+                        "status": "sent",
+                        "isAI": true,
+                        "aiAction": "event_announcement",
+                        "eventTitle": title,
+                        "eventDate": Timestamp(date: date),
+                        "rsvpData": [:] as [String: String],
+                        "replyCount": 0
+                    ])
+                
+                print("✅ Event announcement sent successfully! Doc ID: \(docRef.documentID)")
+            } catch {
+                print("❌ Error sending event announcement: \(error)")
+                print("❌ Error details: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func setRSVP(message: Message, status: RSVPStatus) {
+        guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        Task {
+            do {
+                try await store.setRSVP(
+                    conversationId: conversationId,
+                    messageId: message.id,
+                    userId: userId,
+                    status: status.rawValue
+                )
+                print("✅ RSVP set to \(status.rawValue)")
+            } catch {
+                print("❌ Error setting RSVP: \(error)")
+            }
+        }
+    }
+    
+    private func showRSVPList(for message: Message) {
+        selectedRSVPMessage = message
+        showRSVPList = true
     }
     
     private func checkForMeetingProposals(in newMessages: [Message]) async {
@@ -743,6 +815,12 @@ struct ChatView: View {
                     onAIAction: { message, action in
                         handleAIAction(message: message, action: action)
                     },
+                    onSetRSVP: { message, status in
+                        setRSVP(message: message, status: status)
+                    },
+                    onShowRSVPList: { message in
+                        showRSVPList(for: message)
+                    },
                     showCreateEvent: $showCreateEvent,
                     extractedEvent: $extractedEvent
                 )
@@ -950,8 +1028,20 @@ struct ChatView: View {
             .sheet(isPresented: $showCreateEvent) {
                 CreateEventView(
                     calendarService: calendarService,
-                    eventData: $extractedEvent
+                    eventData: $extractedEvent,
+                    conversationId: conversationId,
+                    onEventCreated: { title, date in
+                        sendEventAnnouncementMessage(title: title, date: date)
+                    }
                 )
+            }
+            .sheet(isPresented: $showRSVPList) {
+                if let message = selectedRSVPMessage {
+                    RSVPListView(
+                        conversationId: conversationId,
+                        messageId: message.id
+                    )
+                }
             }
             .onDisappear {
                 // Mark view as inactive
@@ -990,6 +1080,8 @@ private struct MessagesListView: View {
     let onOpenThread: (Message) -> Void
     let aiLoadingForMessage: String?
     let onAIAction: (Message, AIAction) -> Void
+    let onSetRSVP: (Message, RSVPStatus) -> Void
+    let onShowRSVPList: (Message) -> Void
     @Binding var showCreateEvent: Bool
     @Binding var extractedEvent: ExtractedEventData
     
@@ -1010,67 +1102,83 @@ private struct MessagesListView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    // Load older control (flat, not deeply nested)
-                    if cursor != nil, !visibleMessages.isEmpty {
-                        if loadingOlder {
-                            ProgressView().padding(.vertical, 8)
-                        } else {
-                            Button("Load older messages", action: loadOlder)
-                                .padding(.vertical, 8)
+            messageListView
+                .task(id: messages.last?.id) {
+                    if let id = messages.last?.id {
+                        try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
+                        withAnimation {
+                            proxy.scrollTo(id, anchor: .bottom)
                         }
-                        Divider()
-                    }
-
-                    // In your ScrollView, update the MessageRow call:
-                    ForEach(visibleMessages, id: \.id) { m in
-                        let meUid = me
-                        let isMine = (m.senderId == meUid)
-                        let lastMyMessageId = messages.last(where: { $0.senderId == meUid })?.id
-
-                        let otherUserLastRead: Date? = {
-                            guard let convo = conversation,
-                                  convo.memberCount == 2,
-                                  let me = meUid,
-                                  let other = convo.members.first(where: { $0 != me }) else { return nil }
-                            return readReceiptsMap[other]
-                        }()
-
-                        MessageRow(
-                            message: m,
-                            isMe: isMine,
-                            cap: cap,
-                            rowWidth: rowWidth,
-                            conversation: conversation,
-                            otherUserLastRead: otherUserLastRead,
-                            allReadReceipts: readReceiptsMap,
-                            isLastMessage: (m.id == lastMyMessageId),
-                            aiLoadingForMessage: aiLoadingForMessage,
-                            onReply: {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                    onOpenThread(m)
-                                }
-                            },
-                            onAIAction: onAIAction,
-                            showCreateEvent: $showCreateEvent,
-                            extractedEvent: $extractedEvent
-                        )
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical)
-            }
-            // auto-scroll when a new message arrives
-            .task(id: messages.last?.id) {
-                if let id = messages.last?.id {
-                    try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
-                    withAnimation {
-                        proxy.scrollTo(id, anchor: .bottom)
-                    }
-                }
-            }
         }
+    }
+    
+    private var messageListView: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                loadOlderMessagesControl
+                messagesList
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical)
+        }
+    }
+    
+    @ViewBuilder
+    private var loadOlderMessagesControl: some View {
+        if cursor != nil, !visibleMessages.isEmpty {
+            if loadingOlder {
+                ProgressView().padding(.vertical, 8)
+            } else {
+                Button("Load older messages", action: loadOlder)
+                    .padding(.vertical, 8)
+            }
+            Divider()
+        }
+    }
+    
+    private var messagesList: some View {
+        ForEach(visibleMessages, id: \.id) { m in
+            createMessageRow(for: m)
+        }
+    }
+    
+    private func createMessageRow(for m: Message) -> some View {
+        let meUid = me
+        let isMine = (m.senderId == meUid)
+        let lastMyMessageId = messages.last(where: { $0.senderId == meUid })?.id
+        let otherUserLastRead = getOtherUserLastRead(meUid: meUid)
+        
+        return MessageRow(
+            message: m,
+            isMe: isMine,
+            cap: cap,
+            rowWidth: rowWidth,
+            conversation: conversation,
+            otherUserLastRead: otherUserLastRead,
+            allReadReceipts: readReceiptsMap,
+            isLastMessage: (m.id == lastMyMessageId),
+            aiLoadingForMessage: aiLoadingForMessage,
+            onReply: {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    onOpenThread(m)
+                }
+            },
+            onAIAction: onAIAction,
+            onSetRSVP: onSetRSVP,
+            onShowRSVPList: onShowRSVPList,
+            showCreateEvent: $showCreateEvent,
+            extractedEvent: $extractedEvent
+        )
+    }
+    
+    private func getOtherUserLastRead(meUid: String?) -> Date? {
+        guard let convo = conversation,
+              convo.memberCount == 2,
+              let me = meUid,
+              let other = convo.members.first(where: { $0 != me }) else { return nil }
+        return readReceiptsMap[other]
     }
 }
 
@@ -1086,6 +1194,8 @@ private struct MessageRow: View {
     let aiLoadingForMessage: String?
     let onReply: () -> Void
     let onAIAction: (Message, AIAction) -> Void
+    let onSetRSVP: (Message, RSVPStatus) -> Void
+    let onShowRSVPList: (Message) -> Void
     @Binding var showCreateEvent: Bool
     @Binding var extractedEvent: ExtractedEventData
     
@@ -1100,6 +1210,8 @@ private struct MessageRow: View {
                 AIMessageBubble(
                     message: message,
                     aiLoadingForMessage: aiLoadingForMessage,
+                    onSetRSVP: onSetRSVP,
+                    onShowRSVPList: onShowRSVPList,
                     showCreateEvent: $showCreateEvent,
                     extractedEvent: $extractedEvent
                 )
@@ -1198,6 +1310,31 @@ private struct MessageRow: View {
                     } label: {
                         Label("Track RSVPs", systemImage: "person.3")
                     }
+                    
+                    // RSVP menu for calendar event announcements
+                    if message.aiAction == "event_announcement" {
+                        Divider()
+                        
+                        Menu("RSVP") {
+                            Button {
+                                onSetRSVP(message, .yes)
+                            } label: {
+                                Label("Yes", systemImage: "checkmark.circle.fill")
+                            }
+                            
+                            Button {
+                                onSetRSVP(message, .no)
+                            } label: {
+                                Label("No", systemImage: "xmark.circle.fill")
+                            }
+                            
+                            Button {
+                                onSetRSVP(message, .maybe)
+                            } label: {
+                                Label("Maybe", systemImage: "questionmark.circle.fill")
+                            }
+                        }
+                    }
                 }
                 
                 // Reply count badge - shows total replies in thread
@@ -1211,6 +1348,22 @@ private struct MessageRow: View {
                     }
                     .frame(maxWidth: cap, alignment: isMe ? .trailing : .leading)
                     .padding(.trailing, isMe ? readReceiptTrailingInset : 0)
+                }
+                
+                // RSVP count badge for calendar event announcements - ALWAYS show for event announcements
+                if message.aiAction == "event_announcement" {
+                    Button {
+                        print("🔘 Tapping RSVP badge for message \(message.id) with count: \(message.rsvpCount)")
+                        onShowRSVPList(message)
+                    } label: {
+                        WaveText(
+                            text: message.rsvpCount == 0 ? "RSVP" : 
+                                  message.rsvpCount == 1 ? "1 RSVP" : "\(message.rsvpCount) RSVPs"
+                        )
+                        .font(.caption)
+                        .padding(.top, 2)
+                    }
+                    .frame(maxWidth: cap, alignment: .center)
                 }
                 
                 if isMe, isLastMessage {
@@ -1435,6 +1588,8 @@ private struct OscillatingText: View {
 private struct AIMessageBubble: View {
     let message: Message
     let aiLoadingForMessage: String?
+    let onSetRSVP: (Message, RSVPStatus) -> Void
+    let onShowRSVPList: (Message) -> Void
     @Binding var showCreateEvent: Bool
     @Binding var extractedEvent: ExtractedEventData
     
@@ -1567,6 +1722,21 @@ private struct AIMessageBubble: View {
                                     .foregroundStyle(.white)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
+                        } else if message.aiAction == "event_announcement" {
+                            // Event announcement with animated header
+                            let bodyText: String = {
+                                var text = message.text
+                                    .replacingOccurrences(of: "**Calendar Event Created**", with: "")
+                                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }()
+                            
+                            WalkingBumpsText(text: "Calendar Event Created", color: .white)
+                                .font(.headline)
+                                .fontWeight(.bold)
+                            
+                            Text(parseMarkdown(bodyText))
+                                .foregroundStyle(.white)
+                                .fixedSize(horizontal: false, vertical: true)
                         } else {
                             // Regular AI message
                             Text(parseMarkdown(message.text))
@@ -1586,6 +1756,46 @@ private struct AIMessageBubble: View {
                 .background(Color.black)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .frame(maxWidth: 280)
+                .contextMenu {
+                    // RSVP menu for calendar event announcements
+                    if message.aiAction == "event_announcement" {
+                        Menu("RSVP") {
+                            Button {
+                                onSetRSVP(message, .yes)
+                            } label: {
+                                Label("Yes", systemImage: "checkmark.circle.fill")
+                            }
+                            
+                            Button {
+                                onSetRSVP(message, .no)
+                            } label: {
+                                Label("No", systemImage: "xmark.circle.fill")
+                            }
+                            
+                            Button {
+                                onSetRSVP(message, .maybe)
+                            } label: {
+                                Label("Maybe", systemImage: "questionmark.circle.fill")
+                            }
+                        }
+                    }
+                }
+                
+                // RSVP count badge for calendar event announcements - ALWAYS show for event announcements
+                if message.aiAction == "event_announcement" {
+                    Button {
+                        print("🔘 Tapping RSVP badge for message \(message.id) with count: \(message.rsvpCount)")
+                        onShowRSVPList(message)
+                    } label: {
+                        WaveText(
+                            text: message.rsvpCount == 0 ? "RSVP" : 
+                                  message.rsvpCount == 1 ? "1 RSVP" : "\(message.rsvpCount) RSVPs"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.white)
+                        .padding(.top, 2)
+                    }
+                }
             }
             
             Spacer()

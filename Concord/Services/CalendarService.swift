@@ -514,8 +514,21 @@ class CalendarService: ObservableObject {
         await MainActor.run {
             isGoogleCalendarConnected = true
             
-            // Add Google calendars to availableCalendars
-            let googleCalendarInfos = calendars.map { calendar in
+            // Filter and add Google calendars to availableCalendars
+            // Only include writable calendars (not read-only like Holidays)
+            let writableCalendars = calendars.filter { calendar in
+                let accessRole = calendar.accessRole ?? ""
+                return accessRole == "owner" || accessRole == "writer"
+            }
+            
+            // Sort so primary calendar comes first
+            let sortedCalendars = writableCalendars.sorted { lhs, rhs in
+                if lhs.primary == true { return true }
+                if rhs.primary == true { return false }
+                return lhs.summary < rhs.summary
+            }
+            
+            let googleCalendarInfos = sortedCalendars.map { calendar in
                 CalendarInfo(
                     id: "google_\(calendar.id)",
                     title: calendar.summary,
@@ -528,7 +541,7 @@ class CalendarService: ObservableObject {
             availableCalendars.removeAll { $0.type == .google }
             availableCalendars.append(contentsOf: googleCalendarInfos)
             
-            print("✅ Loaded \(googleCalendarInfos.count) Google calendars")
+            print("✅ Loaded \(googleCalendarInfos.count) writable Google calendars (filtered from \(calendars.count) total)")
         }
         
         try await saveCalendarStatus(apple: nil, google: true)
@@ -768,7 +781,21 @@ class CalendarService: ObservableObject {
                         
                         if let accessToken = GIDSignIn.sharedInstance.currentUser?.accessToken.tokenString {
                             let googleCalendars = try await fetchGoogleCalendars(accessToken: accessToken)
-                            let googleCalendarInfos = googleCalendars.map { calendar in
+                            
+                            // Filter for writable calendars only
+                            let writableCalendars = googleCalendars.filter { calendar in
+                                let accessRole = calendar.accessRole ?? ""
+                                return accessRole == "owner" || accessRole == "writer"
+                            }
+                            
+                            // Sort so primary calendar comes first
+                            let sortedCalendars = writableCalendars.sorted { lhs, rhs in
+                                if lhs.primary == true { return true }
+                                if rhs.primary == true { return false }
+                                return lhs.summary < rhs.summary
+                            }
+                            
+                            let googleCalendarInfos = sortedCalendars.map { calendar in
                                 CalendarInfo(
                                     id: "google_\(calendar.id)",
                                     title: calendar.summary,
@@ -777,7 +804,7 @@ class CalendarService: ObservableObject {
                                 )
                             }
                             allCalendars.append(contentsOf: googleCalendarInfos)
-                            print("✅ Loaded \(googleCalendarInfos.count) Google calendars")
+                            print("✅ Loaded \(googleCalendarInfos.count) writable Google calendars (filtered from \(googleCalendars.count) total)")
                         }
                     }
                 } catch {

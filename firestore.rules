@@ -45,9 +45,18 @@ service cloud.firestore {
                       && request.resource.data.text is string
                       && request.resource.data.text.size() <= 5000;
 
-        // Allow updating replyCount for threading
+        // Allow updating replyCount for threading and rsvpData for RSVP tracking
         allow update: if authed()
-                      && isMemberDoc(get(/databases/$(database)/documents/conversations/$(cid)));
+                      && isMemberDoc(get(/databases/$(database)/documents/conversations/$(cid)))
+                      && (onlyUpdatingReplyCount() || onlyUpdatingRSVP());
+        
+        function onlyUpdatingReplyCount() {
+          return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['replyCount']);
+        }
+        
+        function onlyUpdatingRSVP() {
+          return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvpData']);
+        }
       }
 
       match /typing/{docUid} {

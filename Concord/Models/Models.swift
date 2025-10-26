@@ -33,6 +33,15 @@ struct Message: Identifiable {
     let isAI: Bool               // True if this is an AI-generated message
     let visibleTo: [String]?     // User IDs who can see this AI message (nil = visible to all)
     let aiAction: String?        // Type of AI action (summarize_thread, extract_actions, etc.)
+    
+    // RSVP tracking for calendar events
+    let rsvpData: [String: String]? // userId -> "yes"/"no"/"maybe"
+    let eventTitle: String?      // Title of associated calendar event
+    let eventDate: Date?         // Date/time of associated event
+    
+    var rsvpCount: Int {
+        return rsvpData?.count ?? 0
+    }
 }
 
 enum FS {
@@ -78,4 +87,27 @@ struct SearchFilters {
     var keywords: String
     var senderIds: [String]
     var dateRange: (Date, Date)?
+}
+
+// MARK: - RSVP Models
+
+enum RSVPStatus: String, CaseIterable {
+    case yes = "yes"
+    case no = "no"
+    case maybe = "maybe"
+    
+    var displayText: String {
+        switch self {
+        case .yes: return "Yes"
+        case .no: return "No"
+        case .maybe: return "Maybe"
+        }
+    }
+}
+
+struct RSVPResponse: Identifiable {
+    let id: String // userId
+    let userId: String
+    let displayName: String
+    let status: RSVPStatus
 }

@@ -63,7 +63,10 @@ final class FirestoreService {
             replyCount: data["replyCount"] as? Int ?? 0,
             isAI: data["isAI"] as? Bool ?? false,
             visibleTo: data["visibleTo"] as? [String],
-            aiAction: data["aiAction"] as? String
+            aiAction: data["aiAction"] as? String,
+            rsvpData: data["rsvpData"] as? [String: String],
+            eventTitle: FS.string(data, "eventTitle"),
+            eventDate: FS.date(from: data["eventDate"])
         )
     }
     
@@ -171,7 +174,7 @@ final class FirestoreService {
             let docs = snap?.documents ?? []
             let msgs: [Message] = docs.compactMap { doc in
                 let d = doc.data()
-                return Message(
+                let message = Message(
                     id: doc.documentID,
                     senderId: (d["senderId"] as? String) ?? "",
                     text: (d["text"] as? String) ?? "",
@@ -182,8 +185,22 @@ final class FirestoreService {
                     replyCount: (d["replyCount"] as? Int) ?? 0,
                     isAI: (d["isAI"] as? Bool) ?? false,
                     visibleTo: d["visibleTo"] as? [String],
-                    aiAction: d["aiAction"] as? String
+                    aiAction: d["aiAction"] as? String,
+                    rsvpData: d["rsvpData"] as? [String: String],
+                    eventTitle: FS.string(d, "eventTitle"),
+                    eventDate: FS.date(from: d["eventDate"])
                 )
+                
+                // Log RSVP updates for event announcements
+                if message.aiAction == "event_announcement" {
+                    print("📨 Listener received event_announcement message \(message.id)")
+                    print("   RSVP count: \(message.rsvpCount)")
+                    if let rsvpData = message.rsvpData, !rsvpData.isEmpty {
+                        print("   RSVPs: \(rsvpData)")
+                    }
+                }
+                
+                return message
             }
             onChange(msgs)
         }
@@ -212,7 +229,10 @@ final class FirestoreService {
                 replyCount: (rootData["replyCount"] as? Int) ?? 0,
                 isAI: (rootData["isAI"] as? Bool) ?? false,
                 visibleTo: rootData["visibleTo"] as? [String],
-                aiAction: rootData["aiAction"] as? String
+                aiAction: rootData["aiAction"] as? String,
+                rsvpData: rootData["rsvpData"] as? [String: String],
+                eventTitle: FS.string(rootData, "eventTitle"),
+                eventDate: FS.date(from: rootData["eventDate"])
             ))
         }
         
@@ -235,7 +255,10 @@ final class FirestoreService {
                 replyCount: (d["replyCount"] as? Int) ?? 0,
                 isAI: (d["isAI"] as? Bool) ?? false,
                 visibleTo: d["visibleTo"] as? [String],
-                aiAction: d["aiAction"] as? String
+                aiAction: d["aiAction"] as? String,
+                rsvpData: d["rsvpData"] as? [String: String],
+                eventTitle: FS.string(d, "eventTitle"),
+                eventDate: FS.date(from: d["eventDate"])
             ))
         }
         
@@ -283,7 +306,10 @@ final class FirestoreService {
                     replyCount: (d["replyCount"] as? Int) ?? 0,
                     isAI: (d["isAI"] as? Bool) ?? false,
                     visibleTo: d["visibleTo"] as? [String],
-                    aiAction: d["aiAction"] as? String
+                    aiAction: d["aiAction"] as? String,
+                    rsvpData: d["rsvpData"] as? [String: String],
+                    eventTitle: FS.string(d, "eventTitle"),
+                    eventDate: FS.date(from: d["eventDate"])
                 )
                 print("  - Message: \(msg.text.prefix(30))... threadId=\(msg.threadId ?? "nil")")
                 messages.append(msg)
@@ -404,7 +430,10 @@ final class FirestoreService {
                 replyCount: (d["replyCount"] as? Int) ?? 0,
                 isAI: (d["isAI"] as? Bool) ?? false,
                 visibleTo: d["visibleTo"] as? [String],
-                aiAction: d["aiAction"] as? String
+                aiAction: d["aiAction"] as? String,
+                rsvpData: d["rsvpData"] as? [String: String],
+                eventTitle: FS.string(d, "eventTitle"),
+                eventDate: FS.date(from: d["eventDate"])
             )
         }.reversed())
 
@@ -555,7 +584,10 @@ final class FirestoreService {
                     replyCount: (data["replyCount"] as? Int) ?? 0,
                     isAI: (data["isAI"] as? Bool) ?? false,
                     visibleTo: data["visibleTo"] as? [String],
-                    aiAction: data["aiAction"] as? String
+                    aiAction: data["aiAction"] as? String,
+                    rsvpData: data["rsvpData"] as? [String: String],
+                    eventTitle: FS.string(data, "eventTitle"),
+                    eventDate: FS.date(from: data["eventDate"])
                 )
                 
                 // Get context messages (previous and next)
@@ -576,7 +608,10 @@ final class FirestoreService {
                         replyCount: (prevData["replyCount"] as? Int) ?? 0,
                         isAI: (prevData["isAI"] as? Bool) ?? false,
                         visibleTo: prevData["visibleTo"] as? [String],
-                        aiAction: prevData["aiAction"] as? String
+                        aiAction: prevData["aiAction"] as? String,
+                        rsvpData: prevData["rsvpData"] as? [String: String],
+                        eventTitle: FS.string(prevData, "eventTitle"),
+                        eventDate: FS.date(from: prevData["eventDate"])
                     )
                 }
                 
@@ -594,7 +629,10 @@ final class FirestoreService {
                         replyCount: (nextData["replyCount"] as? Int) ?? 0,
                         isAI: (nextData["isAI"] as? Bool) ?? false,
                         visibleTo: nextData["visibleTo"] as? [String],
-                        aiAction: nextData["aiAction"] as? String
+                        aiAction: nextData["aiAction"] as? String,
+                        rsvpData: nextData["rsvpData"] as? [String: String],
+                        eventTitle: FS.string(nextData, "eventTitle"),
+                        eventDate: FS.date(from: nextData["eventDate"])
                     )
                 }
                 
@@ -666,6 +704,88 @@ final class FirestoreService {
         
         // Sort alphabetically by display name
         return users.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+    
+    // MARK: - RSVP Methods
+    
+    /// Set a user's RSVP status for a calendar event message
+    func setRSVP(conversationId: String, messageId: String, userId: String, status: String) async throws {
+        print("🔵 FirestoreService.setRSVP: conversationId=\(conversationId), messageId=\(messageId), userId=\(userId), status=\(status)")
+        
+        let ref = db.collection("conversations").document(conversationId)
+            .collection("messages").document(messageId)
+        
+        try await ref.updateData([
+            "rsvpData.\(userId)": status
+        ])
+        
+        print("✅ FirestoreService.setRSVP: Successfully set RSVP")
+    }
+    
+    /// Fetch all RSVPs for a calendar event message with user display names
+    func fetchRSVPs(conversationId: String, messageId: String) async throws -> [RSVPResponse] {
+        print("🔵 FirestoreService.fetchRSVPs: conversationId=\(conversationId), messageId=\(messageId)")
+        
+        // Fetch the message to get rsvpData
+        let messageDoc = try await db.collection("conversations")
+            .document(conversationId)
+            .collection("messages")
+            .document(messageId)
+            .getDocument()
+        
+        print("🔵 FirestoreService.fetchRSVPs: Message exists: \(messageDoc.exists)")
+        
+        guard let data = messageDoc.data() else {
+            print("⚠️ FirestoreService.fetchRSVPs: No data in message document")
+            return []
+        }
+        
+        print("🔵 FirestoreService.fetchRSVPs: Message data keys: \(data.keys.joined(separator: ", "))")
+        print("🔵 FirestoreService.fetchRSVPs: rsvpData raw value: \(String(describing: data["rsvpData"]))")
+        
+        guard let rsvpData = data["rsvpData"] as? [String: String] else {
+            print("⚠️ FirestoreService.fetchRSVPs: rsvpData is nil or wrong type")
+            return []
+        }
+        
+        print("🔵 FirestoreService.fetchRSVPs: Found \(rsvpData.count) RSVPs in data")
+        
+        // Fetch display names for each user who RSVP'd
+        var responses: [RSVPResponse] = []
+        
+        for (userId, statusString) in rsvpData {
+            print("🔵 FirestoreService.fetchRSVPs: Processing RSVP - userId: \(userId), status: \(statusString)")
+            
+            // Fetch user's display name
+            var displayName = userId
+            do {
+                let userDoc = try await db.collection("users").document(userId).getDocument()
+                if let userData = userDoc.data() {
+                    displayName = (userData["displayName"] as? String) ?? (userData["email"] as? String) ?? userId
+                    print("🔵 FirestoreService.fetchRSVPs: Found display name: \(displayName)")
+                }
+            } catch {
+                print("⚠️ FirestoreService.fetchRSVPs: Failed to get user \(userId): \(error)")
+            }
+            
+            // Parse status
+            guard let status = RSVPStatus(rawValue: statusString) else {
+                print("⚠️ FirestoreService.fetchRSVPs: Invalid status string: \(statusString)")
+                continue
+            }
+            
+            responses.append(RSVPResponse(
+                id: userId,
+                userId: userId,
+                displayName: displayName,
+                status: status
+            ))
+        }
+        
+        print("🔵 FirestoreService.fetchRSVPs: Returning \(responses.count) responses")
+        
+        // Sort by display name
+        return responses.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
 }

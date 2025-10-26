@@ -838,6 +838,8 @@ struct CreateEventView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var calendarService: CalendarService
     @Binding var eventData: ExtractedEventData
+    let conversationId: String?
+    let onEventCreated: ((String, Date) -> Void)?
     
     @State private var selectedCalendar: CalendarInfo?
     @State private var conflicts: [CalendarEvent] = []
@@ -1033,6 +1035,14 @@ struct CreateEventView: View {
                 await MainActor.run {
                     isCreatingEvent = false
                     showSuccess = true
+                    
+                    // Notify conversation view if this event was created from a conversation
+                    if conversationId != nil {
+                        print("✅ Event created, calling onEventCreated callback with title: \(eventData.title)")
+                        onEventCreated?(eventData.title, date)
+                    } else {
+                        print("ℹ️ Event created but no conversationId - not sending announcement")
+                    }
                 }
             } catch {
                 await MainActor.run {
