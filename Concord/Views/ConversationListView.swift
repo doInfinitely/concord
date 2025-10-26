@@ -20,27 +20,91 @@ struct ConversationListView: View {
     @State private var showProfile = false
     @State private var errorText: String?
     
+    // Search state
+    @State private var searchText = ""
+    @State private var showAdvancedSearch = false
+    @State private var showSearchResults = false
+    @State private var searchResults: [SearchResult] = []
+    @State private var isSearching = false
+    
+    // Advanced search filters
+    @State private var searchKeywords = ""
+    @State private var selectedSenders: Set<String> = []
+    @State private var dateRangeStart: Date?
+    @State private var dateRangeEnd: Date?
+    @State private var naturalLanguageQuery = ""
+    
     private let store = FirestoreService()
+    private let aiService = AIService()
 
     var body: some View {
         NavigationStack {
-            Group {
-                if conversations.isEmpty {
-                    ContentUnavailableView(
-                        "No conversations yet",
-                        systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Start a DM or create a group to get chatting.")
-                    )
-                } else {
-                    List(conversations, id: \.id, selection: $selection) { convo in
-                        Button {
-                            selection = convo
-                        } label: {
-                            ConversationRow(convo: convo, myUid: auth.uid)
+            VStack(spacing: 0) {
+                // Main content
+                Group {
+                    if conversations.isEmpty {
+                        ContentUnavailableView(
+                            "No conversations yet",
+                            systemImage: "bubble.left.and.bubble.right",
+                            description: Text("Start a DM or create a group to get chatting.")
+                        )
+                    } else {
+                        List(conversations, id: \.id, selection: $selection) { convo in
+                            Button {
+                                selection = convo
+                            } label: {
+                                ConversationRow(convo: convo, myUid: auth.uid)
+                            }
+                        }
+                        .listStyle(.insetGrouped)
+                    }
+                }
+                
+                // Search bar at bottom
+                HStack(spacing: 12) {
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        
+                        TextField("Search messages...", text: $searchText)
+                            .textFieldStyle(.plain)
+                            .onSubmit {
+                                performSimpleSearch()
+                            }
+                        
+                        if !searchText.isEmpty {
+                            Button {
+                                searchText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
-                    .listStyle(.insetGrouped)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(.systemGray6))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    
+                    Button {
+                        showAdvancedSearch = true
+                    } label: {
+                        Text("Advanced")
+                            .font(.subheadline)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.black)
+                            .foregroundStyle(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
                 }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color(.systemBackground))
+                .overlay(
+                    Divider(),
+                    alignment: .top
+                )
             }
             .navigationTitle("Concord")
             .toolbar {
@@ -120,6 +184,26 @@ struct ConversationListView: View {
             .sheet(isPresented: $showProfile) {
                 ProfileView()
             }
+            .sheet(isPresented: $showAdvancedSearch) {
+                AdvancedSearchView(
+                    keywords: $searchKeywords,
+                    selectedSenders: $selectedSenders,
+                    dateRangeStart: $dateRangeStart,
+                    dateRangeEnd: $dateRangeEnd,
+                    naturalLanguageQuery: $naturalLanguageQuery,
+                    onSearch: performAdvancedSearch
+                )
+            }
+            .sheet(isPresented: $showSearchResults) {
+                SearchResultsView(
+                    results: searchResults,
+                    keywords: searchKeywords.isEmpty ? searchText : searchKeywords,
+                    onResultTap: handleSearchResultTap,
+                    onRefresh: {
+                        await performSearchRefresh()
+                    }
+                )
+            }
             .overlay {
                 if let err = errorText {
                     VStack {
@@ -130,6 +214,23 @@ struct ConversationListView: View {
                             .background(.red.opacity(0.1))
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .padding(.bottom, 8)
+                    }
+                }
+                
+                if isSearching {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    
+                    VStack {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .padding()
+                            .background(Color(.systemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        
+                        Text("Searching...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -146,6 +247,127 @@ struct ConversationListView: View {
                 selection = convo
                 selectedConversationId = nil // Reset after navigation
             }
+        }
+    }
+    
+    // MARK: - Search Methods
+    
+    private func performSimpleSearch() {
+        guard !searchText.isEmpty, let userId = auth.uid else { return }
+        
+        Task {
+            isSearching = true
+            defer { isSearching = false }
+            
+            do {
+                searchKeywords = searchText
+                selectedSenders = []
+                dateRangeStart = nil
+                dateRangeEnd = nil
+                naturalLanguageQuery = ""
+                
+                let results = try await store.searchMessages(
+                    userId: userId,
+                    keywords: searchText,
+                    senderIds: nil,
+                    dateRange: nil,
+                    limit: 100
+                )
+                
+                searchResults = results
+                showSearchResults = true
+            } catch {
+                errorText = "Search failed: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    private func performAdvancedSearch() {
+        guard let userId = auth.uid else { return }
+        
+        Task {
+            isSearching = true
+            defer { isSearching = false }
+            
+            do {
+                // Check if only natural language query is provided (no filters)
+                let hasFilters = !searchKeywords.isEmpty || !selectedSenders.isEmpty || (dateRangeStart != nil && dateRangeEnd != nil)
+                
+                // Stage 1: Firestore query with filters
+                let senderIds = selectedSenders.isEmpty ? nil : Array(selectedSenders)
+                let dateRange = (dateRangeStart != nil && dateRangeEnd != nil) ? (dateRangeStart!, dateRangeEnd!) : nil
+                
+                // If only NL query provided, fetch more messages for AI to rank
+                let limit = (!hasFilters && !naturalLanguageQuery.isEmpty) ? 300 : 100
+                
+                var results = try await store.searchMessages(
+                    userId: userId,
+                    keywords: searchKeywords.isEmpty ? nil : searchKeywords,
+                    senderIds: senderIds,
+                    dateRange: dateRange,
+                    limit: limit
+                )
+                
+                // Stage 2: AI ranking if natural language query provided
+                if !naturalLanguageQuery.isEmpty && !results.isEmpty {
+                    print("🤖 Applying AI ranking with query: \(naturalLanguageQuery)")
+                    results = try await aiService.intelligentSearch(
+                        results: results,
+                        naturalLanguageQuery: naturalLanguageQuery
+                    )
+                }
+                
+                searchResults = results
+                showSearchResults = true
+            } catch {
+                errorText = "Search failed: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    private func performSearchRefresh() async {
+        guard let userId = auth.uid else { return }
+        
+        do {
+            // Re-run the last search
+            let senderIds = selectedSenders.isEmpty ? nil : Array(selectedSenders)
+            let dateRange = (dateRangeStart != nil && dateRangeEnd != nil) ? (dateRangeStart!, dateRangeEnd!) : nil
+            let keywords = searchKeywords.isEmpty ? (searchText.isEmpty ? nil : searchText) : searchKeywords
+            
+            // Check if only natural language query is provided (no filters)
+            let hasFilters = keywords != nil || !selectedSenders.isEmpty || dateRange != nil
+            
+            // If only NL query provided, fetch more messages for AI to rank
+            let limit = (!hasFilters && !naturalLanguageQuery.isEmpty) ? 300 : 100
+            
+            var results = try await store.searchMessages(
+                userId: userId,
+                keywords: keywords,
+                senderIds: senderIds,
+                dateRange: dateRange,
+                limit: limit
+            )
+            
+            // Apply AI ranking if needed
+            if !naturalLanguageQuery.isEmpty && !results.isEmpty {
+                results = try await aiService.intelligentSearch(
+                    results: results,
+                    naturalLanguageQuery: naturalLanguageQuery
+                )
+            }
+            
+            searchResults = results
+        } catch {
+            errorText = "Search refresh failed: \(error.localizedDescription)"
+        }
+    }
+    
+    private func handleSearchResultTap(_ result: SearchResult) {
+        // Navigate to the conversation and scroll to the message
+        if let convo = conversations.first(where: { $0.id == result.conversationId }) {
+            selection = convo
+            // Store the message ID to highlight in ChatView
+            // We'll need to pass this through somehow - for now just navigate
         }
     }
 }

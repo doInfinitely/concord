@@ -474,6 +474,199 @@ final class FirestoreService {
             // optional: print("updateReadReceipt error:", error.localizedDescription)
         }
     }
+    
+    // MARK: - Search Methods
+    
+    /// Search messages across all conversations the user is a member of
+    func searchMessages(
+        userId: String,
+        keywords: String?,
+        senderIds: [String]?,
+        dateRange: (Date, Date)?,
+        limit: Int = 100
+    ) async throws -> [SearchResult] {
+        print("🔍 Searching messages for user \(userId)")
+        print("   Keywords: \(keywords ?? "none")")
+        print("   Senders: \(senderIds?.joined(separator: ", ") ?? "none")")
+        print("   Date range: \(dateRange?.0 ?? Date.distantPast) to \(dateRange?.1 ?? Date.distantFuture)")
+        
+        // First, get all conversations the user is in
+        let conversationsQuery = db.collection("conversations")
+            .whereField("members", arrayContains: userId)
+        
+        let conversationsSnapshot = try await getDocumentsAsync(query: conversationsQuery)
+        var allResults: [SearchResult] = []
+        
+        // For each conversation, search messages
+        for convDoc in conversationsSnapshot.documents {
+            let conversationId = convDoc.documentID
+            let convData = convDoc.data()
+            let conversationName = convData["name"] as? String
+            
+            // Build query for messages in this conversation
+            var messagesQuery: Query = db.collection("conversations")
+                .document(conversationId)
+                .collection("messages")
+            
+            // Apply date range filter if provided
+            if let dateRange = dateRange {
+                messagesQuery = messagesQuery
+                    .whereField("createdAt", isGreaterThanOrEqualTo: Timestamp(date: dateRange.0))
+                    .whereField("createdAt", isLessThanOrEqualTo: Timestamp(date: dateRange.1))
+            }
+            
+            // Order by createdAt and limit
+            messagesQuery = messagesQuery
+                .order(by: "createdAt", descending: true)
+                .limit(to: limit)
+            
+            let messagesSnapshot = try await getDocumentsAsync(query: messagesQuery)
+            let messages = messagesSnapshot.documents
+            
+            // Filter messages in memory (Firestore doesn't support text search)
+            for (index, doc) in messages.enumerated() {
+                let data = doc.data()
+                let text = (data["text"] as? String) ?? ""
+                let senderId = (data["senderId"] as? String) ?? ""
+                
+                // Apply sender filter
+                if let senderIds = senderIds, !senderIds.isEmpty, !senderIds.contains(senderId) {
+                    continue
+                }
+                
+                // Apply keyword filter (case-insensitive)
+                if let keywords = keywords, !keywords.isEmpty {
+                    let keywordLower = keywords.lowercased()
+                    let textLower = text.lowercased()
+                    if !textLower.contains(keywordLower) {
+                        continue
+                    }
+                }
+                
+                // Create message object
+                let message = Message(
+                    id: doc.documentID,
+                    senderId: senderId,
+                    text: text,
+                    createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
+                    status: data["status"] as? String,
+                    threadId: data["threadId"] as? String,
+                    parentMessageId: data["parentMessageId"] as? String,
+                    replyCount: (data["replyCount"] as? Int) ?? 0,
+                    isAI: (data["isAI"] as? Bool) ?? false,
+                    visibleTo: data["visibleTo"] as? [String],
+                    aiAction: data["aiAction"] as? String
+                )
+                
+                // Get context messages (previous and next)
+                var previousMessage: Message? = nil
+                var nextMessage: Message? = nil
+                
+                if index < messages.count - 1 {
+                    let prevDoc = messages[index + 1] // reversed order (descending)
+                    let prevData = prevDoc.data()
+                    previousMessage = Message(
+                        id: prevDoc.documentID,
+                        senderId: (prevData["senderId"] as? String) ?? "",
+                        text: (prevData["text"] as? String) ?? "",
+                        createdAt: (prevData["createdAt"] as? Timestamp)?.dateValue(),
+                        status: prevData["status"] as? String,
+                        threadId: prevData["threadId"] as? String,
+                        parentMessageId: prevData["parentMessageId"] as? String,
+                        replyCount: (prevData["replyCount"] as? Int) ?? 0,
+                        isAI: (prevData["isAI"] as? Bool) ?? false,
+                        visibleTo: prevData["visibleTo"] as? [String],
+                        aiAction: prevData["aiAction"] as? String
+                    )
+                }
+                
+                if index > 0 {
+                    let nextDoc = messages[index - 1] // reversed order (descending)
+                    let nextData = nextDoc.data()
+                    nextMessage = Message(
+                        id: nextDoc.documentID,
+                        senderId: (nextData["senderId"] as? String) ?? "",
+                        text: (nextData["text"] as? String) ?? "",
+                        createdAt: (nextData["createdAt"] as? Timestamp)?.dateValue(),
+                        status: nextData["status"] as? String,
+                        threadId: nextData["threadId"] as? String,
+                        parentMessageId: nextData["parentMessageId"] as? String,
+                        replyCount: (nextData["replyCount"] as? Int) ?? 0,
+                        isAI: (nextData["isAI"] as? Bool) ?? false,
+                        visibleTo: nextData["visibleTo"] as? [String],
+                        aiAction: nextData["aiAction"] as? String
+                    )
+                }
+                
+                // Get sender display name
+                var senderDisplayName: String? = nil
+                if senderId != "ai_assistant" {
+                    do {
+                        let userDoc = try await db.collection("users").document(senderId).getDocument()
+                        if let userData = userDoc.data() {
+                            senderDisplayName = (userData["displayName"] as? String) ?? (userData["email"] as? String)
+                        }
+                    } catch {
+                        print("⚠️ Failed to get sender name for \(senderId): \(error)")
+                    }
+                }
+                
+                let searchResult = SearchResult(
+                    id: doc.documentID,
+                    message: message,
+                    conversationId: conversationId,
+                    conversationName: conversationName,
+                    senderDisplayName: senderDisplayName,
+                    relevanceScore: nil,
+                    previousMessage: previousMessage,
+                    nextMessage: nextMessage
+                )
+                
+                allResults.append(searchResult)
+            }
+        }
+        
+        print("🔍 Found \(allResults.count) matching messages")
+        
+        // Sort by date descending (most recent first)
+        return allResults.sorted { ($0.message.createdAt ?? Date.distantPast) > ($1.message.createdAt ?? Date.distantPast) }
+    }
+    
+    /// Get all users the current user has chatted with (for sender filter UI)
+    func getAllChatPartners(userId: String) async throws -> [(id: String, displayName: String)] {
+        // Get all conversations the user is in
+        let conversationsQuery = db.collection("conversations")
+            .whereField("members", arrayContains: userId)
+        
+        let conversationsSnapshot = try await getDocumentsAsync(query: conversationsQuery)
+        var userIds = Set<String>()
+        
+        // Collect all unique member IDs (except the current user)
+        for doc in conversationsSnapshot.documents {
+            let data = doc.data()
+            let members = (data["members"] as? [String]) ?? []
+            for memberId in members where memberId != userId {
+                userIds.insert(memberId)
+            }
+        }
+        
+        // Fetch display names for all users
+        var users: [(id: String, displayName: String)] = []
+        for uid in userIds {
+            do {
+                let userDoc = try await db.collection("users").document(uid).getDocument()
+                if let userData = userDoc.data() {
+                    let displayName = (userData["displayName"] as? String) ?? (userData["email"] as? String) ?? uid
+                    users.append((id: uid, displayName: displayName))
+                }
+            } catch {
+                print("⚠️ Failed to get user \(uid): \(error)")
+            }
+        }
+        
+        // Sort alphabetically by display name
+        return users.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
 
 }
 

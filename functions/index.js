@@ -636,3 +636,108 @@ exports.checkConflictsAndSuggest = onCall(
         }
     }
 );
+
+// Intelligent search - rank messages by relevance to natural language query
+exports.intelligentSearch = onCall(
+    {secrets: [openaiApiKey]},
+    async (request) => {
+        const {messages, query} = request.data;
+        
+        if (!messages || !Array.isArray(messages) || messages.length === 0) {
+            throw new Error('Messages array is required');
+        }
+        
+        if (!query || typeof query !== 'string') {
+            throw new Error('Query string is required');
+        }
+        
+        console.log(`🤖 Intelligent search: query="${query}", ${messages.length} messages`);
+        
+        try {
+            const openai = new OpenAI({
+                apiKey: openaiApiKey.value(),
+            });
+            
+            // Prepare message data for the AI
+            const messageTexts = messages.map((msg, idx) => {
+                const senderName = msg.senderName || 'Unknown';
+                const conversationName = msg.conversationName || 'DM';
+                const date = new Date(msg.createdAt * 1000).toLocaleDateString();
+                return `[${idx}] From ${senderName} in ${conversationName} on ${date}: ${msg.text}`;
+            }).join('\n\n');
+            
+            const prompt = `You are a search assistant. Given a list of messages and a user query, rank each message by relevance to the query on a scale of 0.0 to 1.0, where 1.0 is highly relevant and 0.0 is not relevant at all.
+
+Query: "${query}"
+
+Messages:
+${messageTexts}
+
+Respond with ONLY a valid JSON array of objects with "index" (the message number in brackets) and "score" (0.0-1.0) fields, ordered by relevance score descending. Example format:
+[{"index": 5, "score": 0.95}, {"index": 2, "score": 0.80}, ...]`;
+            
+            const completion = await openai.chat.completions.create({
+                model: 'gpt-4o',
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'You are a precise search relevance scoring assistant. Always respond with valid JSON only, no additional text.',
+                    },
+                    {
+                        role: 'user',
+                        content: prompt,
+                    },
+                ],
+                temperature: 0.3,
+            });
+            
+            const responseText = completion.choices[0].message.content.trim();
+            console.log('🤖 AI response:', responseText);
+            
+            // Parse JSON response
+            let rankings;
+            try {
+                rankings = JSON.parse(responseText);
+            } catch (parseError) {
+                console.error('Failed to parse AI response:', parseError);
+                // Try to extract JSON from markdown code blocks
+                const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+                if (jsonMatch) {
+                    rankings = JSON.parse(jsonMatch[1]);
+                } else {
+                    throw new Error('AI response is not valid JSON');
+                }
+            }
+            
+            if (!Array.isArray(rankings)) {
+                throw new Error('AI response is not an array');
+            }
+            
+            // Map indices back to message IDs
+            const result = rankings.map(ranking => {
+                const messageIndex = ranking.index;
+                if (messageIndex >= 0 && messageIndex < messages.length) {
+                    return {
+                        messageId: messages[messageIndex].id,
+                        score: ranking.score,
+                    };
+                }
+                return null;
+            }).filter(r => r !== null);
+            
+            console.log(`🤖 Ranked ${result.length} messages`);
+            
+            return {
+                success: true,
+                rankings: result,
+            };
+            
+        } catch (error) {
+            console.error('Error in intelligent search:', error);
+            return {
+                success: false,
+                error: `Intelligent search error: ${error.message}`,
+            };
+        }
+    }
+);

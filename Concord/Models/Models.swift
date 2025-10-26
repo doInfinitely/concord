@@ -58,3 +58,24 @@ enum FS {
         dict[key] as? Int ?? 0
     }
 }
+
+// MARK: - Search Models
+
+struct SearchResult: Identifiable {
+    let id: String
+    let message: Message
+    let conversationId: String
+    let conversationName: String?
+    let senderDisplayName: String?
+    var relevanceScore: Double? // Set by AI if NL query used
+    
+    // Context messages for snippet display
+    let previousMessage: Message?
+    let nextMessage: Message?
+}
+
+struct SearchFilters {
+    var keywords: String
+    var senderIds: [String]
+    var dateRange: (Date, Date)?
+}
