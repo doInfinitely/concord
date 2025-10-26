@@ -28,7 +28,8 @@ class AIService {
         threadId: String?,
         action: AIAction,
         userId: String,
-        messageText: String? = nil
+        messageText: String? = nil,
+        messageTimestamp: Date? = nil
     ) async throws -> (response: String, messageId: String) {
         let callable = functions.httpsCallable("aiService")
         
@@ -41,6 +42,12 @@ class AIService {
         
         if let messageText = messageText {
             data["messageText"] = messageText
+        }
+        
+        if let messageTimestamp = messageTimestamp {
+            data["messageTimestamp"] = messageTimestamp.timeIntervalSince1970
+            // Pass timezone offset in seconds (e.g., -28800 for PST, which is UTC-8)
+            data["timezoneOffset"] = TimeZone.current.secondsFromGMT()
         }
         
         do {

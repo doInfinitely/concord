@@ -274,6 +274,7 @@ class CalendarService: ObservableObject {
         
         var availableSlots: [Date] = []
         var currentTime = workStart
+        let now = Date()
         
         // Check each 30-minute slot
         let slotIncrement: TimeInterval = 1800 // 30 minutes
@@ -281,15 +282,21 @@ class CalendarService: ObservableObject {
         while currentTime < workEnd && availableSlots.count < slotCount {
             let slotEnd = currentTime.addingTimeInterval(duration)
             
+            // Check if this slot is in the past
+            let isPast = currentTime < now
+            
             // Check if this slot conflicts with any existing event
             let hasConflict = sortedEvents.contains { event in
                 // Check if the proposed slot overlaps with this event
                 return (currentTime < event.endDate && slotEnd > event.startDate)
             }
             
-            if !hasConflict && slotEnd <= workEnd {
+            // Only suggest slots that are in the future and don't conflict
+            if !isPast && !hasConflict && slotEnd <= workEnd {
                 availableSlots.append(currentTime)
                 print("📅   ✅ Free slot found: \(currentTime)")
+            } else if isPast {
+                print("📅   ⏰ Skipping past time: \(currentTime)")
             }
             
             currentTime = currentTime.addingTimeInterval(slotIncrement)
@@ -381,6 +388,34 @@ class CalendarService: ObservableObject {
         proposedDate: Date,
         duration: TimeInterval
     ) async throws -> (hasConflict: Bool, conflicts: [CalendarEvent], suggestions: [Date]) {
+        let now = Date()
+        
+        // Check if the proposed time is in the past
+        if proposedDate < now {
+            print("📅 Conflict Check: Proposed time is in the past")
+            // Create a synthetic "conflict" to indicate past time
+            let pastConflict = CalendarEvent(
+                id: "past",
+                title: "This time has already passed",
+                startDate: proposedDate,
+                endDate: proposedDate.addingTimeInterval(duration),
+                location: nil,
+                notes: "Cannot schedule meetings in the past",
+                calendar: CalendarInfo(id: "system", title: "System", type: .apple, color: nil)
+            )
+            
+            // Find alternative slots
+            let suggestions = try await findAvailableSlots(
+                on: now, // Start searching from now
+                duration: duration,
+                workingHoursStart: 9,
+                workingHoursEnd: 17,
+                slotCount: 3
+            )
+            
+            return (true, [pastConflict], suggestions)
+        }
+        
         // Check for conflicts across all calendars
         let conflicts = try await checkConflictsAcrossAllCalendars(
             date: proposedDate,

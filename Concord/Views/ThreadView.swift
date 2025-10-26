@@ -214,12 +214,19 @@ struct ThreadOverlayView: View {
                 
                 print("🤖 Calling AI service from ThreadView: action=\(action.rawValue), threadId=\(threadId)")
                 
+                // For calendar extraction, pass the message timestamp so AI can interpret relative dates correctly
+                let messageTimestamp = (action == .extractEvent) ? message.createdAt : nil
+                if let timestamp = messageTimestamp {
+                    print("📅 [ThreadView] Passing message timestamp to AI: \(timestamp)")
+                }
+                
                 // Call AI service
                 let (response, messageId) = try await aiService.performAIAction(
                     conversationId: conversationId,
                     threadId: threadId,
                     action: action,
-                    userId: userId
+                    userId: userId,
+                    messageTimestamp: messageTimestamp
                 )
                 
                 print("✅ AI response received: \(response.prefix(50))...")
@@ -233,8 +240,17 @@ struct ThreadOverlayView: View {
                 if action == .extractEvent {
                     print("📅 [ThreadView] Parsing calendar event from AI response")
                     // Parse the AI response and show the event creation sheet
-                    let parsedEvent = calendarService.parseEventData(from: response)
+                    var parsedEvent = calendarService.parseEventData(from: response)
                     print("📅 [ThreadView] Parsed event: title=\(parsedEvent.title), date=\(parsedEvent.date?.description ?? "nil")")
+                    
+                    // If the extracted date is in the past, adjust it to the future
+                    if let eventDate = parsedEvent.date, eventDate < Date() {
+                        print("📅 [ThreadView] WARNING: Extracted date is in the past (\(eventDate))")
+                        let adjustedDate = adjustPastDateToFuture(eventDate)
+                        print("📅 [ThreadView] Adjusted to future date: \(adjustedDate)")
+                        parsedEvent.date = adjustedDate
+                    }
+                    
                     print("📅 [ThreadView] Available calendars: \(calendarService.availableCalendars.count)")
                     
                     await MainActor.run {
@@ -252,6 +268,20 @@ struct ThreadOverlayView: View {
                 }
             }
         }
+    }
+    
+    /// Adjust a past date to a reasonable future time
+    /// Increments by 1 hour at a time until we find a future time
+    private func adjustPastDateToFuture(_ pastDate: Date) -> Date {
+        let now = Date()
+        var adjustedDate = pastDate
+        
+        // Keep adding 1 hour until we're in the future
+        while adjustedDate < now {
+            adjustedDate = adjustedDate.addingTimeInterval(3600) // Add 1 hour
+        }
+        
+        return adjustedDate
     }
     
     private func sendEventAnnouncementMessage(title: String, date: Date) {

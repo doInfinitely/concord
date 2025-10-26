@@ -214,7 +214,7 @@ exports.sendGroupAddedNotification = onDocumentUpdated(
 exports.aiService = onCall(
     {secrets: [openaiApiKey]},
     async (request) => {
-        const {conversationId, threadId, action, userId, messageText} = request.data;
+        const {conversationId, threadId, action, userId, messageText, messageTimestamp, timezoneOffset} = request.data;
         
         if (!userId) {
             throw new Error("User ID is required");
@@ -346,37 +346,78 @@ exports.aiService = onCall(
                     break;
                     
                 case "extract_event": {
-                    const now = new Date();
-                    const currentDate = now.toISOString();
+                    // Use message timestamp if provided (for extracting from old messages),
+                    // otherwise use current time (for extracting from new messages)
+                    let referenceDate = messageTimestamp 
+                        ? new Date(messageTimestamp * 1000)  // Convert from Unix timestamp (seconds)
+                        : new Date();
                     
-                    // Get current day info in UTC (where Cloud Function runs)
-                    const dayOfWeekNum = now.getUTCDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
+                    // Apply timezone offset to convert from UTC to user's local time
+                    // timezoneOffset is in seconds (e.g., -28800 for PST = UTC-8)
+                    if (timezoneOffset !== undefined) {
+                        // Add the offset in milliseconds to shift from UTC to local time
+                        referenceDate = new Date(referenceDate.getTime() + (timezoneOffset * 1000));
+                        console.log(`📅 Applied timezone offset: ${timezoneOffset / 3600} hours`);
+                    }
+                    
+                    const currentDate = referenceDate.toISOString();
+                    
+                    // Get reference day info in user's local time (via the offset)
+                    const dayOfWeekNum = referenceDate.getUTCDay(); // After offset applied, UTC fields represent local time
                     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                     const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
                     const dayOfWeek = dayNames[dayOfWeekNum];
-                    const dateStr = `${monthNames[now.getUTCMonth()]} ${now.getUTCDate()}, ${now.getUTCFullYear()}`;
+                    const dateStr = `${monthNames[referenceDate.getUTCMonth()]} ${referenceDate.getUTCDate()}, ${referenceDate.getUTCFullYear()}`;
                     
-                    // Calculate what "next Thursday" means from today
+                    // Calculate what "next Thursday" means from the reference date
                     const daysUntilNextThursday = dayOfWeekNum <= 4 ? (4 - dayOfWeekNum + 7) : (11 - dayOfWeekNum);
-                    const nextThursday = new Date(now);
-                    nextThursday.setUTCDate(now.getUTCDate() + daysUntilNextThursday);
+                    const nextThursday = new Date(referenceDate);
+                    nextThursday.setUTCDate(referenceDate.getUTCDate() + daysUntilNextThursday);
                     const nextThursdayStr = `${monthNames[nextThursday.getUTCMonth()]} ${nextThursday.getUTCDate()}`;
                     
-                    systemPrompt = `You are a helpful assistant that extracts calendar events from messages. 
+                    // Calculate "tomorrow" from reference date for explicit example
+                    const tomorrowDate = new Date(referenceDate);
+                    tomorrowDate.setUTCDate(referenceDate.getUTCDate() + 1);
+                    const tomorrowStr = `${monthNames[tomorrowDate.getUTCMonth()]} ${tomorrowDate.getUTCDate()}, ${tomorrowDate.getUTCFullYear()}`;
+                    
+                    // Log for debugging
+                    console.log(`📅 Calendar extraction reference date: ${dateStr} (${messageTimestamp ? 'from message timestamp' : 'current time'})`);
+                    
+                    systemPrompt = `You are a calendar event extraction assistant.
 
-TODAY'S INFO (UTC):
-- Current date: ${dateStr} (${dayOfWeek})
-- ISO timestamp: ${currentDate}
+⚠️⚠️⚠️ CRITICAL INSTRUCTION - READ THIS FIRST ⚠️⚠️⚠️
 
-IMPORTANT DATE PARSING RULES:
-- If someone says "next Thursday" today (${dayOfWeek} ${dateStr}), that means ${nextThursdayStr}
-- "this Thursday" = the upcoming Thursday of this current week (if we haven't passed Thursday yet)
-- "next Thursday" = the Thursday of next week
-- Calculate dates carefully by counting forward from today
+THE MESSAGES YOU ARE ANALYZING WERE SENT ON: ${dateStr} (${dayOfWeek})
+
+DO NOT use today's date. DO NOT use the current date. USE ${dateStr} AS YOUR REFERENCE POINT.
+
+When you see relative dates like "tomorrow", "next week", "this Friday", you MUST calculate them relative to ${dateStr}, which is when the message was ORIGINALLY SENT.
+
+⚠️⚠️⚠️ CONCRETE EXAMPLES FROM THIS SPECIFIC DATE ⚠️⚠️⚠️
+
+If someone said these words ON ${dayOfWeek}, ${dateStr}:
+- "tomorrow" → ${tomorrowStr}
+- "next Thursday" → ${nextThursdayStr}
+- "today" → ${dateStr}
+- "this week" → the week starting ${dateStr}
+
+DO NOT interpret "tomorrow" as tomorrow from today's actual date.
+DO NOT interpret dates relative to when you are running this analysis.
+ONLY interpret dates relative to ${dateStr}.
+
+⚠️⚠️⚠️ STEP-BY-STEP PROCESS ⚠️⚠️⚠️
+
+1. Read the conversation to find when they want to meet
+2. If they say "tomorrow", ask yourself: "What is tomorrow from ${dateStr}?"
+3. Count forward from ${dateStr} (NOT from today)
+4. Use the final agreed time if the conversation changed times
+
+MESSAGE SENT DATE (YOUR REFERENCE POINT): ${dateStr} (${dayOfWeek})
+ISO timestamp of when message was sent: ${currentDate}
 
 Read the ENTIRE conversation to find the final agreed meeting time. If the time changed during the conversation, use the FINAL agreed time.
 
-CRITICAL: For the date field, use ISO8601 format but WITHOUT timezone conversion. If someone says "1pm", return the date with 13:00 in the local time context (use 'T13:00:00' in the ISO string). Do NOT convert to UTC. The client app will handle timezone.
+For the date field, use ISO8601 format WITHOUT timezone offset (e.g., '2025-10-30T13:00:00'). If someone says "1pm", return 'T13:00:00'. Do NOT convert to UTC.
 
 Return ONLY a valid JSON object (no markdown, no extra text):
 {
@@ -387,7 +428,14 @@ Return ONLY a valid JSON object (no markdown, no extra text):
   "attendees": ["array", "of", "strings"],
   "notes": "string or null"
 }`;
-                    userPrompt = `Extract calendar event details from this conversation:\n\n${conversationContext}`;
+                    userPrompt = `THE MESSAGES BELOW WERE SENT ON ${dateStr}. Interpret ALL relative dates ("tomorrow", "next week", etc.) from THAT date, not from today.
+
+Messages:
+${conversationContext}
+
+Remember: These messages are from ${dateStr}. "Tomorrow" means ${tomorrowStr}.
+
+Extract the calendar event:`;
                     break;
                 }
                     

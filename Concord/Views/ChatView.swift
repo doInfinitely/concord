@@ -315,12 +315,19 @@ struct ChatView: View {
                 
                 print("🤖 Calling AI service: action=\(action.rawValue), threadId=\(threadId)")
                 
+                // For calendar extraction, pass the message timestamp so AI can interpret relative dates correctly
+                let messageTimestamp = (action == .extractEvent) ? message.createdAt : nil
+                if let timestamp = messageTimestamp {
+                    print("📅 Passing message timestamp to AI: \(timestamp)")
+                }
+                
                 // Call AI service
                 let (response, messageId) = try await aiService.performAIAction(
                     conversationId: conversationId,
                     threadId: threadId,
                     action: action,
-                    userId: userId
+                    userId: userId,
+                    messageTimestamp: messageTimestamp
                 )
                 
                 print("✅ AI response received: \(response.prefix(50))...")
@@ -334,8 +341,17 @@ struct ChatView: View {
                 if action == .extractEvent {
                     print("📅 Parsing calendar event from AI response")
                     // Parse the AI response and show the event creation sheet
-                    let parsedEvent = calendarService.parseEventData(from: response)
+                    var parsedEvent = calendarService.parseEventData(from: response)
                     print("📅 Parsed event: title=\(parsedEvent.title), date=\(parsedEvent.date?.description ?? "nil")")
+                    
+                    // If the extracted date is in the past, adjust it to the future
+                    if let eventDate = parsedEvent.date, eventDate < Date() {
+                        print("📅 WARNING: Extracted date is in the past (\(eventDate))")
+                        let adjustedDate = adjustPastDateToFuture(eventDate)
+                        print("📅 Adjusted to future date: \(adjustedDate)")
+                        parsedEvent.date = adjustedDate
+                    }
+                    
                     print("📅 Available calendars: \(calendarService.availableCalendars.count)")
                     
                     await MainActor.run {
@@ -409,6 +425,20 @@ struct ChatView: View {
             // Simple fallback
             return "Meeting"
         }
+    }
+    
+    /// Adjust a past date to a reasonable future time
+    /// Increments by 1 hour at a time until we find a future time
+    private func adjustPastDateToFuture(_ pastDate: Date) -> Date {
+        let now = Date()
+        var adjustedDate = pastDate
+        
+        // Keep adding 1 hour until we're in the future
+        while adjustedDate < now {
+            adjustedDate = adjustedDate.addingTimeInterval(3600) // Add 1 hour
+        }
+        
+        return adjustedDate
     }
     
     private func sendEventAnnouncementMessage(title: String, date: Date) {
