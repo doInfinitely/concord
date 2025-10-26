@@ -41,9 +41,13 @@ struct ConversationListView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                // Background
-                Color(red: 242/255, green: 242/255, blue: 242/255)
+                // Fluid simulation background (at back, fills screen)
+                Color.white  // Add explicit white background UNDER fluid
                     .ignoresSafeArea()
+                
+                FluidBackgroundView()
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)  // CRITICAL: Don't block UI touches!
                 
                 VStack(spacing: 0) {
                     // Main content
@@ -61,8 +65,10 @@ struct ConversationListView: View {
                                 } label: {
                                     ConversationRow(convo: convo, myUid: auth.uid)
                                 }
+                                .listRowBackground(Color.white.opacity(0.85))
                             }
                             .listStyle(.insetGrouped)
+                            .scrollContentBackground(.hidden)
                         }
                     }
                 
@@ -106,13 +112,26 @@ struct ConversationListView: View {
                 }
                     .padding(.horizontal)
                     .padding(.vertical, 8)
-                    .background(Color(.systemBackground))
+                    .background(Color.white.opacity(0.9))
                     .overlay(
                         Divider(),
                         alignment: .top
                     )
                 }
+                
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                    .onChanged { value in
+                        // Forward to fluid sim (using global coords)
+                        // Only triggers on actual drags, not taps (minimumDistance: 10)
+                        FluidTouchForwarder.shared.handleTouch(at: value.location)
+                    }
+                    .onEnded { _ in
+                        // Reset dragging state when gesture ends
+                        FluidTouchForwarder.shared.endDrag()
+                    }
+            )
             .navigationTitle("Concord")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
