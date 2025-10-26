@@ -9,6 +9,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
+import UserNotifications
 
 // Preference key for measuring read receipt width
 fileprivate struct ReadReceiptWidthKey: PreferenceKey {
@@ -67,8 +68,14 @@ struct ChatView: View {
     @State private var extractedEvent = ExtractedEventData()
     @StateObject private var calendarService = CalendarService()
     
+    // Notification Service
+    @StateObject private var notificationService = NotificationService()
+    
     // Track processed messages to avoid duplicates
     @State private var processedMessageIds = Set<String>()
+    
+    // Track messages we've already shown notifications for
+    @State private var notifiedMessageIds = Set<String>()
     
     // RSVP Tracking
     @State private var showRSVPList = false
@@ -472,6 +479,42 @@ struct ChatView: View {
         showRSVPList = true
     }
     
+    private func showNotificationForNewMessage(_ message: Message) async {
+        // Get sender display name
+        let senderName: String
+        do {
+            let userDoc = try await Firestore.firestore()
+                .collection("users")
+                .document(message.senderId)
+                .getDocument()
+            
+            if let userData = userDoc.data() {
+                senderName = (userData["displayName"] as? String) ?? 
+                            (userData["email"] as? String) ?? 
+                            "Unknown"
+            } else {
+                senderName = "Unknown"
+            }
+        } catch {
+            print("❌ Error fetching sender name: \(error)")
+            senderName = "Unknown"
+        }
+        
+        // Determine conversation name and if it's a group chat
+        let conversationName = conversation?.name ?? chatTitle
+        let isGroupChat = (conversation?.memberCount ?? 0) > 2
+        
+        // Show notification with automatic priority detection
+        await notificationService.showNotificationForMessage(
+            messageId: message.id,
+            messageText: message.text,
+            senderName: senderName,
+            conversationId: conversationId,
+            conversationName: conversationName,
+            isGroupChat: isGroupChat
+        )
+    }
+    
     private func checkForMeetingProposals(in newMessages: [Message]) async {
         guard let uid = Auth.auth().currentUser?.uid else {
             print("📅 Proactive: No uid")
@@ -871,6 +914,11 @@ struct ChatView: View {
                 // Set view as active
                 isViewActive = true
                 
+                // Clear notification badge when entering conversation
+                await MainActor.run {
+                    UNUserNotificationCenter.current().setBadgeCount(0)
+                }
+                
                 // 1) Wait for auth
                 guard let uid = await waitForUID() else {
                     print("ChatView: no UID yet; aborting listeners")
@@ -910,9 +958,37 @@ struct ChatView: View {
                         
                         print("📨 Messages updated: prev=\(previousCount), new=\(msgs.count)")
                         
-                        // Check for new messages with meeting proposals (proactive assistant)
+                        // Show notifications for new messages (not from current user)
                         if msgs.count > previousCount {
                             let newMessages = Array(msgs.suffix(msgs.count - previousCount))
+                            
+                            // Filter out messages from current user and AI messages
+                            // Only notify for messages that are VERY recent (within last 5 seconds)
+                            // and that we haven't already notified about
+                            let now = Date()
+                            let newMessagesFromOthers = newMessages.filter { msg in
+                                guard msg.senderId != uid && !msg.isAI else { return false }
+                                guard !notifiedMessageIds.contains(msg.id) else { return false }
+                                
+                                // Only notify for messages created within last 5 seconds
+                                if let createdAt = msg.createdAt {
+                                    let age = now.timeIntervalSince(createdAt)
+                                    return age < 5.0
+                                }
+                                return false
+                            }
+                            
+                            // Show notifications for messages from other users
+                            if !newMessagesFromOthers.isEmpty {
+                                Task {
+                                    for message in newMessagesFromOthers {
+                                        notifiedMessageIds.insert(message.id)
+                                        await showNotificationForNewMessage(message)
+                                    }
+                                }
+                            }
+                            
+                            // Check for meeting proposals (proactive assistant)
                             print("📨 Checking \(newMessages.count) new messages for meeting proposals")
                             Task {
                                 await checkForMeetingProposals(in: newMessages)
@@ -1291,12 +1367,6 @@ private struct MessageRow: View {
                         onAIAction(message, .summarizeDecision)
                     } label: {
                         Label("Summarize Decision", systemImage: "checkmark.circle")
-                    }
-                    
-                    Button {
-                        onAIAction(message, .checkPriority)
-                    } label: {
-                        Label("Check Priority", systemImage: "exclamationmark.triangle")
                     }
                     
                     Button {

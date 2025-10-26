@@ -8,6 +8,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
+import UserNotifications
 
 struct ConversationListView: View {
     @EnvironmentObject var auth: AuthService
@@ -242,6 +243,9 @@ struct ConversationListView: View {
             }
         }
         .task {
+            // Clear notification badge when app opens to conversation list
+            UNUserNotificationCenter.current().setBadgeCount(0)
+            
             guard let uid = auth.uid else { return }
             _ = store.listenConversations(for: uid) { items in
                 conversations = items

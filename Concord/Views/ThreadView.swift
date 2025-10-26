@@ -448,12 +448,6 @@ private struct ThreadMessageBubble: View {
                         }
                         
                         Button {
-                            onAIAction(message, .checkPriority)
-                        } label: {
-                            Label("Check Priority", systemImage: "exclamationmark.triangle")
-                        }
-                        
-                        Button {
                             onAIAction(message, .extractEvent)
                         } label: {
                             Label("Extract Calendar Event", systemImage: "calendar.badge.plus")

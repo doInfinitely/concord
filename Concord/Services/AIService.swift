@@ -165,5 +165,48 @@ class AIService {
             throw error
         }
     }
+    
+    /// Check if a message is high priority (for automatic notification priority detection)
+    func checkPriority(messageText: String) async throws -> String {
+        print("🔔 Checking priority for message: \(messageText.prefix(50))...")
+        
+        let callable = functions.httpsCallable("checkPriority")
+        
+        let data: [String: Any] = [
+            "messageText": messageText
+        ]
+        
+        do {
+            let result = try await callable.call(data)
+            
+            guard let resultData = result.data as? [String: Any],
+                  let success = resultData["success"] as? Bool,
+                  success,
+                  let response = resultData["response"] as? String else {
+                
+                if let resultData = result.data as? [String: Any],
+                   let errorMsg = resultData["error"] as? String {
+                    print("❌ Priority check error: \(errorMsg)")
+                    throw NSError(
+                        domain: "AIService",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: errorMsg]
+                    )
+                }
+                
+                throw NSError(
+                    domain: "AIService",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid response from priority check"]
+                )
+            }
+            
+            print("🔔 Priority check result: \(response)")
+            return response
+        } catch let error as NSError {
+            print("❌ Priority check error: \(error)")
+            throw error
+        }
+    }
 }
 

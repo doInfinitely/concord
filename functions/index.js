@@ -741,3 +741,77 @@ Respond with ONLY a valid JSON array of objects with "index" (the message number
         }
     }
 );
+
+// Check Priority - Automatically detect if a message is high priority
+exports.checkPriority = onCall(
+    {secrets: [openaiApiKey]},
+    async (request) => {
+        const {messageText} = request.data;
+        
+        if (!messageText) {
+            return {
+                success: false,
+                error: 'No message text provided',
+            };
+        }
+        
+        try {
+            console.log('🔔 Checking priority for message:', messageText.substring(0, 50));
+            
+            const openai = new OpenAI({
+                apiKey: openaiApiKey.value(),
+            });
+            
+            const prompt = `You are a message priority detector. Analyze the following message and determine if it is HIGH PRIORITY or NORMAL PRIORITY.
+
+A message is HIGH PRIORITY if it:
+- Contains urgent keywords (URGENT, ASAP, EMERGENCY, IMPORTANT, CRITICAL)
+- Mentions deadlines or time-sensitive information
+- Requests immediate action or response
+- Contains safety or security concerns
+- Has multiple exclamation marks or capital letters indicating urgency
+
+A message is NORMAL PRIORITY if it:
+- Is a casual conversation
+- Is informational without urgency
+- Is a question that doesn't require immediate response
+- Is a greeting or acknowledgment
+
+Message: "${messageText}"
+
+Respond with ONLY "HIGH PRIORITY" or "NORMAL PRIORITY" followed by a brief explanation.`;
+            
+            const completion = await openai.chat.completions.create({
+                model: 'gpt-4o-mini', // Use mini model for faster/cheaper priority detection
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'You are a message priority classifier. Respond concisely with just the priority level and a brief reason.',
+                    },
+                    {
+                        role: 'user',
+                        content: prompt,
+                    },
+                ],
+                temperature: 0.3,
+                max_tokens: 100,
+            });
+            
+            const response = completion.choices[0].message.content.trim();
+            console.log('🔔 Priority check result:', response);
+            
+            return {
+                success: true,
+                response: response,
+            };
+            
+        } catch (error) {
+            console.error('Error checking priority:', error);
+            // Default to normal priority on error
+            return {
+                success: true,
+                response: 'NORMAL PRIORITY (Error during check, defaulting to normal)',
+            };
+        }
+    }
+);
