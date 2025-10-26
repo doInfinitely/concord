@@ -186,7 +186,7 @@ struct ConversationListView: View {
             }
             .sheet(isPresented: $showCreateGroup) {
                 if let uid = auth.uid {
-                    CreateGroupChatView(myUid: uid) { conversationId in
+                    CreateGroupChatView(myUid: uid, conversations: conversations) { conversationId in
                         // Fetch the created conversation
                         let convSnap = try await Firestore.firestore()
                             .collection("conversations")

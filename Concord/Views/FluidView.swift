@@ -1,15 +1,15 @@
 import SwiftUI
 import MetalKit
 
-// ===== Config (tuned for ULTRA calm, gentle fluid behavior) =====
+// ===== Config (tuned for MAXIMUM calm, zen-like fluid behavior) =====
 fileprivate let N: Int = 64                   // Higher resolution for smoother flow
-fileprivate let jacobiIters = 20              // More iterations for maximum stability
+fileprivate let jacobiIters = 24              // Maximum iterations for ultra stability
 fileprivate let visc: Float = 0.0             // Zero viscosity
 fileprivate let dt: Float = 1.0/60.0          // Standard timestep
 
 // Particles
 fileprivate let particleCapacity = 20000
-fileprivate let emitPerFrame = 10             // Fewer particles for less chaos
+fileprivate let emitPerFrame = 5              // Minimal particles for zen calm
 fileprivate let emitRadius = 0.05 as Float    // Moderate spread
 fileprivate let pointSizePx: Float = 48.0     // Large particles for visibility
 fileprivate let particleDarkness: Float = 1.0 // Fully opaque
@@ -250,9 +250,9 @@ struct FluidView: UIViewRepresentable {
                               dyeDissipation: 1.0)
             memcpy(paramsBuf.contents(), &P, MemoryLayout<SimParams>.stride)
 
-            // Calculate touch velocity for force (ULTRA gentle for maximum calm)
+            // Calculate touch velocity for force (ZEN-LIKE calm for maximum serenity)
             let touchVelocity = (lastTouch - prevTouch) / dt  // pixels/sec in normalized coords
-            let forceGain: Float = 0.15 * Float(N)            // Ultra gentle (was 0.4, originally 10.0)
+            let forceGain: Float = 0.08 * Float(N)            // Zen gentle (was 0.15, originally 10.0)
             let force = dragging ? touchVelocity * forceGain : SIMD2<Float>(0, 0)
             
             var B = Brush(pos: lastTouch,

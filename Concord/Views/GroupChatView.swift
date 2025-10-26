@@ -9,10 +9,33 @@ import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 
+// MARK: - DM Contact Model
+struct DMContact: Identifiable {
+    let id: String // UID
+    let displayName: String
+    let email: String?
+    let lastMessageAt: Date?
+    
+    var initials: String {
+        if !displayName.isEmpty {
+            let components = displayName.components(separatedBy: " ")
+            if components.count >= 2 {
+                return "\(components[0].prefix(1))\(components[1].prefix(1))".uppercased()
+            }
+            return String(displayName.prefix(2)).uppercased()
+        }
+        if let email = email {
+            return String(email.prefix(2)).uppercased()
+        }
+        return "??"
+    }
+}
+
 // MARK: - Create Group Chat View
 struct CreateGroupChatView: View {
     @Environment(\.dismiss) private var dismiss
     let myUid: String
+    let conversations: [Conversation] // NEW: pass conversations to extract DM partners
     let onCreate: (String) async throws -> Void
     
     @State private var groupName = ""
@@ -20,6 +43,8 @@ struct CreateGroupChatView: View {
     @State private var memberUidInput = ""
     @State private var errorText: String?
     @State private var isCreating = false
+    @State private var dmContacts: [DMContact] = [] // NEW: list of DM partners
+    @State private var isLoadingContacts = true
     
     private let store = FirestoreService()
     
@@ -31,7 +56,66 @@ struct CreateGroupChatView: View {
                         .autocapitalization(.words)
                 }
                 
-                Section("Add Members") {
+                // NEW: Add people from your DMs
+                Section("Add from Your Chats") {
+                    if isLoadingContacts {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
+                        }
+                    } else if dmContacts.isEmpty {
+                        Text("No DM contacts found")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    } else {
+                        ForEach(dmContacts) { contact in
+                            Button {
+                                toggleContact(contact.id)
+                            } label: {
+                                HStack {
+                                    // Avatar
+                                    Circle()
+                                        .fill(Color.gray.opacity(0.2))
+                                        .frame(width: 36, height: 36)
+                                        .overlay(
+                                            Text(contact.initials)
+                                                .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.black)
+                                        )
+                                    
+                                    // Name and email
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(contact.displayName)
+                                            .font(.body)
+                                            .foregroundStyle(.primary)
+                                        
+                                        if let email = contact.email {
+                                            Text(email)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    // Checkmark if selected
+                                    if selectedMembers.contains(contact.id) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.green)
+                                    } else {
+                                        Image(systemName: "circle")
+                                            .foregroundStyle(.gray)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                
+                Section("Or Add by UID") {
                     HStack {
                         TextField("Paste UID", text: $memberUidInput)
                             .textInputAutocapitalization(.never)
@@ -55,9 +139,35 @@ struct CreateGroupChatView: View {
                     Section("Selected Members (\(selectedMembers.count))") {
                         ForEach(Array(selectedMembers), id: \.self) { uid in
                             HStack {
-                                Text(shortUid(uid))
-                                    .font(.system(.body, design: .monospaced))
+                                // Show name if it's a DM contact, otherwise show UID
+                                if let contact = dmContacts.first(where: { $0.id == uid }) {
+                                    Circle()
+                                        .fill(Color.gray.opacity(0.2))
+                                        .frame(width: 32, height: 32)
+                                        .overlay(
+                                            Text(contact.initials)
+                                                .font(.caption2)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.black)
+                                        )
+                                    
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(contact.displayName)
+                                            .font(.body)
+                                        
+                                        if let email = contact.email {
+                                            Text(email)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                } else {
+                                    Text(shortUid(uid))
+                                        .font(.system(.body, design: .monospaced))
+                                }
+                                
                                 Spacer()
+                                
                                 Button {
                                     selectedMembers.remove(uid)
                                 } label: {
@@ -100,6 +210,60 @@ struct CreateGroupChatView: View {
                     Text(error)
                 }
             }
+            .task {
+                await loadDMContacts()
+            }
+        }
+    }
+    
+    private func toggleContact(_ uid: String) {
+        if selectedMembers.contains(uid) {
+            selectedMembers.remove(uid)
+        } else {
+            selectedMembers.insert(uid)
+        }
+    }
+    
+    private func loadDMContacts() async {
+        isLoadingContacts = true
+        defer { isLoadingContacts = false }
+        
+        // Extract DM partners from conversations (ordered as in ConversationListView)
+        let dmConversations = conversations.filter { convo in
+            convo.memberCount == 2 && convo.members.contains(myUid)
+        }
+        
+        // Get the other person's UID for each DM
+        var contacts: [DMContact] = []
+        
+        for convo in dmConversations {
+            guard let otherUid = convo.members.first(where: { $0 != myUid }) else { continue }
+            
+            // Fetch user profile
+            do {
+                let userDoc = try await Firestore.firestore()
+                    .collection("users")
+                    .document(otherUid)
+                    .getDocument()
+                
+                if let data = userDoc.data() {
+                    let displayName = (data["displayName"] as? String) ?? (data["email"] as? String) ?? "Unknown"
+                    let email = data["email"] as? String
+                    
+                    contacts.append(DMContact(
+                        id: otherUid,
+                        displayName: displayName,
+                        email: email,
+                        lastMessageAt: convo.lastMessageAt
+                    ))
+                }
+            } catch {
+                print("⚠️ Failed to fetch user \(otherUid): \(error)")
+            }
+        }
+        
+        await MainActor.run {
+            dmContacts = contacts
         }
     }
     

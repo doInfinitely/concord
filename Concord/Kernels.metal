@@ -241,8 +241,8 @@ kernel void kAdvectParticles(
     vel = clamp(vel, float2(-50.0), float2(50.0));
     
     // Apply velocity to particle (velocity is in grid cells/sec, scale appropriately)
-    // Use very small multiplier for ultra-calm, gentle movement
-    float2 displacement = P.dt * vel * P.invTexSize * 10.0f;
+    // Use tiny multiplier for zen-like, barely-there movement
+    float2 displacement = P.dt * vel * P.invTexSize * 5.0f;
     p.pos.x += displacement.x;
     p.pos.y += displacement.y;
     
