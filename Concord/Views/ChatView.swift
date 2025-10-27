@@ -461,24 +461,31 @@ struct ChatView: View {
             print("📣 Attempting to send event announcement to conversation: \(conversationId)")
             
             do {
+                let messageData: [String: Any] = [
+                    "senderId": Auth.auth().currentUser?.uid ?? "",
+                    "text": messageText,
+                    "createdAt": FieldValue.serverTimestamp(),
+                    "status": "sent",
+                    "isAI": true,
+                    "aiAction": "event_announcement",
+                    "eventTitle": title,
+                    "eventDate": Timestamp(date: date),
+                    "rsvpData": [:] as [String: String],
+                    "replyCount": 0
+                    // NOTE: No visibleTo field - visible to ALL participants
+                ]
+                
+                print("📣 Sending event announcement with data: \(messageData.keys.joined(separator: ", "))")
+                print("📣 No visibleTo field set - should be visible to ALL participants")
+                
                 let docRef = try await Firestore.firestore()
                     .collection("conversations")
                     .document(conversationId)
                     .collection("messages")
-                    .addDocument(data: [
-                        "senderId": Auth.auth().currentUser?.uid ?? "",
-                        "text": messageText,
-                        "createdAt": FieldValue.serverTimestamp(),
-                        "status": "sent",
-                        "isAI": true,
-                        "aiAction": "event_announcement",
-                        "eventTitle": title,
-                        "eventDate": Timestamp(date: date),
-                        "rsvpData": [:] as [String: String],
-                        "replyCount": 0
-                    ])
+                    .addDocument(data: messageData)
                 
                 print("✅ Event announcement sent successfully! Doc ID: \(docRef.documentID)")
+                print("✅ All participants in conversation should now see this message")
             } catch {
                 print("❌ Error sending event announcement: \(error)")
                 print("❌ Error details: \(error.localizedDescription)")
@@ -489,19 +496,87 @@ struct ChatView: View {
     private func setRSVP(message: Message, status: RSVPStatus) {
         guard let userId = Auth.auth().currentUser?.uid else { return }
         
+        print("🔵 setRSVP called for message \(message.id), status: \(status.rawValue)")
+        print("🔵 Message aiAction: \(message.aiAction ?? "nil")")
+        print("🔵 Current userId: \(userId)")
+        
         Task {
             do {
+                // Update the RSVP data on the EVENT ANNOUNCEMENT message
+                print("🔵 Updating RSVP data on message \(message.id)")
                 try await store.setRSVP(
                     conversationId: conversationId,
                     messageId: message.id,
                     userId: userId,
                     status: status.rawValue
                 )
-                print("✅ RSVP set to \(status.rawValue)")
+                print("✅ RSVP data updated successfully")
+                
+                // Also send a reply message so everyone can see the RSVP
+                print("🔵 Sending RSVP reply message...")
+                try await sendRSVPReply(to: message, status: status)
+                print("✅ RSVP reply sent successfully")
+                
             } catch {
                 print("❌ Error setting RSVP: \(error)")
+                print("❌ Error details: \(error.localizedDescription)")
             }
         }
+    }
+    
+    private func sendRSVPReply(to message: Message, status: RSVPStatus) async throws {
+        guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        // Get user's display name
+        let userDoc = try await Firestore.firestore()
+            .collection("users")
+            .document(userId)
+            .getDocument()
+        
+        let displayName = (userDoc.data()?["displayName"] as? String) ?? 
+                         (userDoc.data()?["email"] as? String) ?? 
+                         "Someone"
+        
+        // Determine the thread ID (root message ID)
+        let threadId = message.threadId ?? message.id
+        
+        // Create reply text with emoji
+        let emoji: String
+        switch status {
+        case .yes: emoji = "✅"
+        case .no: emoji = "❌"
+        case .maybe: emoji = "❓"
+        }
+        
+        let replyText = "\(emoji) **\(displayName)** RSVP'd: **\(status.displayText)**"
+        
+        // Send the reply message
+        let docRef = try await Firestore.firestore()
+            .collection("conversations")
+            .document(conversationId)
+            .collection("messages")
+            .addDocument(data: [
+                "senderId": userId,
+                "text": replyText,
+                "createdAt": FieldValue.serverTimestamp(),
+                "status": "sent",
+                "threadId": threadId,
+                "parentMessageId": message.id,
+                "isAI": true, // Mark as AI since it's auto-generated
+                "replyCount": 0
+            ])
+        
+        // Increment reply count on parent message
+        try await Firestore.firestore()
+            .collection("conversations")
+            .document(conversationId)
+            .collection("messages")
+            .document(message.id)
+            .updateData([
+                "replyCount": FieldValue.increment(Int64(1))
+            ])
+        
+        print("✅ RSVP reply sent: \(docRef.documentID)")
     }
     
     private func showRSVPList(for message: Message) {

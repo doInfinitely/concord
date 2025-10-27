@@ -19,19 +19,35 @@ struct RSVPListView: View {
     
     private let firestoreService = FirestoreService()
     
+    init(conversationId: String, messageId: String) {
+        self.conversationId = conversationId
+        self.messageId = messageId
+        print("🟣🟣🟣 RSVPListView INIT - conversationId: \(conversationId), messageId: \(messageId)")
+    }
+    
     var body: some View {
-        NavigationStack {
+        print("🟣 RSVPListView body rendering - isLoading: \(isLoading), responses: \(rsvpResponses.count), error: \(errorMessage ?? "none")")
+        return NavigationStack {
             Group {
                 if isLoading {
                     ProgressView("Loading RSVPs...")
+                        .onAppear {
+                            print("🟣 Showing loading spinner")
+                        }
                 } else if let errorMessage {
                     ContentUnavailableView("Error", systemImage: "xmark.octagon.fill", description: Text(errorMessage))
+                        .onAppear {
+                            print("🟣 Showing error: \(errorMessage)")
+                        }
                 } else if rsvpResponses.isEmpty {
                     ContentUnavailableView(
                         "No RSVPs yet",
                         systemImage: "person.3.fill",
                         description: Text("No one has responded to this event yet.")
                     )
+                    .onAppear {
+                        print("🟣 Showing empty state")
+                    }
                 } else {
                     List {
                         Section("Yes (\(rsvps(for: .yes).count))") {

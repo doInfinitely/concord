@@ -334,6 +334,7 @@ struct ThreadOverlayView: View {
         
         Task {
             do {
+                // Update the RSVP data on the message
                 try await store.setRSVP(
                     conversationId: conversationId,
                     messageId: message.id,
@@ -341,10 +342,69 @@ struct ThreadOverlayView: View {
                     status: status.rawValue
                 )
                 print("✅ [ThreadView] RSVP set to \(status.rawValue)")
+                
+                // Also send a reply message so everyone can see the RSVP
+                try await sendRSVPReply(to: message, status: status)
+                
             } catch {
                 print("❌ [ThreadView] Error setting RSVP: \(error)")
             }
         }
+    }
+    
+    private func sendRSVPReply(to message: Message, status: RSVPStatus) async throws {
+        guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        // Get user's display name
+        let userDoc = try await Firestore.firestore()
+            .collection("users")
+            .document(userId)
+            .getDocument()
+        
+        let displayName = (userDoc.data()?["displayName"] as? String) ?? 
+                         (userDoc.data()?["email"] as? String) ?? 
+                         "Someone"
+        
+        // Determine the thread ID (root message ID)
+        let threadId = message.threadId ?? message.id
+        
+        // Create reply text with emoji
+        let emoji: String
+        switch status {
+        case .yes: emoji = "✅"
+        case .no: emoji = "❌"
+        case .maybe: emoji = "❓"
+        }
+        
+        let replyText = "\(emoji) **\(displayName)** RSVP'd: **\(status.displayText)**"
+        
+        // Send the reply message
+        let docRef = try await Firestore.firestore()
+            .collection("conversations")
+            .document(conversationId)
+            .collection("messages")
+            .addDocument(data: [
+                "senderId": userId,
+                "text": replyText,
+                "createdAt": FieldValue.serverTimestamp(),
+                "status": "sent",
+                "threadId": threadId,
+                "parentMessageId": message.id,
+                "isAI": true, // Mark as AI since it's auto-generated
+                "replyCount": 0
+            ])
+        
+        // Increment reply count on parent message
+        try await Firestore.firestore()
+            .collection("conversations")
+            .document(conversationId)
+            .collection("messages")
+            .document(message.id)
+            .updateData([
+                "replyCount": FieldValue.increment(Int64(1))
+            ])
+        
+        print("✅ [ThreadView] RSVP reply sent: \(docRef.documentID)")
     }
     
     private func showRSVPList(for message: Message) {

@@ -48,7 +48,7 @@ service cloud.firestore {
         // Allow updating replyCount for threading and rsvpData for RSVP tracking
         allow update: if authed()
                       && isMemberDoc(get(/databases/$(database)/documents/conversations/$(cid)))
-                      && (onlyUpdatingReplyCount() || onlyUpdatingRSVP());
+                      && (onlyUpdatingReplyCount() || onlyUpdatingRSVP() || onlyUpdatingRSVPNested());
         
         function onlyUpdatingReplyCount() {
           return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['replyCount']);
@@ -56,6 +56,12 @@ service cloud.firestore {
         
         function onlyUpdatingRSVP() {
           return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvpData']);
+        }
+        
+        // Allow updating nested fields within rsvpData (e.g., rsvpData.userId)
+        function onlyUpdatingRSVPNested() {
+          let keys = request.resource.data.diff(resource.data).affectedKeys();
+          return keys.size() == 1 && keys.hasAll(['rsvpData']);
         }
       }
 
