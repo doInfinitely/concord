@@ -1026,15 +1026,25 @@ struct CreateEventView: View {
     private func createEvent() {
         guard let date = eventData.date,
               let calendar = selectedCalendar else {
+            print("❌ createEvent: Missing date or calendar")
+            print("   date: \(eventData.date?.description ?? "nil")")
+            print("   selectedCalendar: \(selectedCalendar?.title ?? "nil")")
             return
         }
+        
+        print("📅 CreateEventView.createEvent called:")
+        print("   title: \(eventData.title)")
+        print("   date: \(date)")
+        print("   calendar: \(calendar.title) (type: \(calendar.type))")
+        print("   conversationId: \(conversationId ?? "nil")")
         
         isCreatingEvent = true
         
         Task {
             do {
                 if calendar.type == .apple {
-                    _ = try await calendarService.createAppleCalendarEvent(
+                    print("📱 Creating event in Apple Calendar...")
+                    let eventId = try await calendarService.createAppleCalendarEvent(
                         calendarId: calendar.id,
                         title: eventData.title,
                         startDate: date,
@@ -1043,8 +1053,10 @@ struct CreateEventView: View {
                         notes: eventData.notes,
                         attendees: eventData.attendees ?? []
                     )
+                    print("✅ Apple Calendar event created with ID: \(eventId)")
                 } else {
-                    _ = try await calendarService.createGoogleCalendarEvent(
+                    print("🌐 Creating event in Google Calendar...")
+                    let eventId = try await calendarService.createGoogleCalendarEvent(
                         calendarId: calendar.id,
                         title: eventData.title,
                         startDate: date,
@@ -1053,6 +1065,7 @@ struct CreateEventView: View {
                         notes: eventData.notes,
                         attendees: eventData.attendees
                     )
+                    print("✅ Google Calendar event created with ID: \(eventId)")
                 }
                 
                 await MainActor.run {
@@ -1068,9 +1081,13 @@ struct CreateEventView: View {
                     }
                 }
             } catch {
+                print("❌ createEvent failed with error: \(error)")
+                print("   Error type: \(type(of: error))")
+                print("   Error description: \(error.localizedDescription)")
                 await MainActor.run {
                     isCreatingEvent = false
                     errorMessage = error.localizedDescription
+                    print("❌ Error message set to: \(error.localizedDescription)")
                 }
             }
         }

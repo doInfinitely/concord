@@ -448,10 +448,25 @@ class CalendarService: ObservableObject {
         notes: String?,
         attendees: [String]
     ) async throws -> String {
+        print("📅 createAppleCalendarEvent called:")
+        print("   calendarId: \(calendarId)")
+        print("   title: \(title)")
+        print("   startDate: \(startDate)")
+        print("   duration: \(duration)s")
+        print("   location: \(location ?? "nil")")
+        print("   attendees: \(attendees)")
+        
         let ekCalendarId = String(calendarId.dropFirst(6)) // Remove "apple_" prefix
+        print("   ekCalendarId (after removing prefix): \(ekCalendarId)")
+        
         guard let calendar = eventStore.calendar(withIdentifier: ekCalendarId) else {
+            print("❌ Calendar not found with identifier: \(ekCalendarId)")
+            print("   Available calendars: \(eventStore.calendars(for: .event).map { "\($0.title) (\($0.calendarIdentifier))" })")
             throw NSError(domain: "CalendarService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Calendar not found"])
         }
+        
+        print("   Found calendar: \(calendar.title)")
+        print("   Calendar allows modifications: \(calendar.allowsContentModifications)")
         
         let event = EKEvent(eventStore: eventStore)
         event.title = title
@@ -461,17 +476,31 @@ class CalendarService: ObservableObject {
         event.location = location
         event.notes = notes
         
+        print("   Created EKEvent object")
+        
         // Add attendees (EventKit uses EKParticipant, which requires email addresses)
         // For now, we'll add them to notes if they're not email addresses
         if !attendees.isEmpty {
             let attendeeText = "\n\nAttendees: " + attendees.joined(separator: ", ")
             event.notes = (notes ?? "") + attendeeText
+            print("   Added \(attendees.count) attendees to notes")
         }
         
-        try eventStore.save(event, span: .thisEvent)
-        
-        print("✅ Created Apple Calendar event: \(title)")
-        return event.eventIdentifier
+        print("   Attempting to save event...")
+        do {
+            try eventStore.save(event, span: .thisEvent)
+            print("✅ Successfully saved Apple Calendar event!")
+            print("   Event ID: \(event.eventIdentifier)")
+            print("   Calendar: \(calendar.title)")
+            print("   Date: \(startDate)")
+            return event.eventIdentifier
+        } catch {
+            print("❌ Failed to save event: \(error)")
+            print("   Error domain: \((error as NSError).domain)")
+            print("   Error code: \((error as NSError).code)")
+            print("   Error description: \(error.localizedDescription)")
+            throw error
+        }
     }
     
     /// Disconnect Apple Calendar

@@ -21,15 +21,27 @@ struct ThreadOverlayView: View {
     @State private var replyText: String = ""
     @State private var isLoading = true
     @State private var threadListener: ListenerRegistration?
+    @State private var typingListener: ListenerRegistration?
     @State private var aiLoadingForMessage: String? = nil
     @State private var showCreateEvent = false
     @State private var extractedEvent = ExtractedEventData()
     @State private var showRSVPList = false
     @State private var selectedRSVPMessage: Message?
     
+    // Typing indicator
+    @State private var othersTyping = false
+    @State private var typingTask: Task<Void, Never>?
+    @State private var typingLastSeenAt: Date? = nil
+    @State private var typingVisibleSince: Date? = nil
+    @State private var typingHideTask: Task<Void, Never>?
+    
     private let store = FirestoreService()
     private let aiService = AIService()
     @StateObject private var calendarService = CalendarService()
+    
+    // Typing indicator constants
+    private let typingMinVisible: TimeInterval = 0.75
+    private let typingInactivityGrace: TimeInterval = 0.5
     
     var body: some View {
         GeometryReader { geometry in
@@ -129,11 +141,49 @@ struct ThreadOverlayView: View {
                     }
                 }
                 
+                // Typing indicator
+                if othersTyping {
+                    HStack(spacing: 4) {
+                        Text("typing")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TypingDotsView()
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 4)
+                }
+                
                 // Reply input
                 HStack(spacing: 12) {
                     TextField("Reply to thread...", text: $replyText, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1...5)
+                        .onChange(of: replyText) { newValue in
+                            guard let uid = Auth.auth().currentUser?.uid else { return }
+                            
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            
+                            // Cancel any existing typing task
+                            typingTask?.cancel()
+                            
+                            if !trimmed.isEmpty {
+                                // User is typing - send immediately
+                                Task {
+                                    await store.setTyping(conversationId: conversationId, uid: uid, isTyping: true)
+                                }
+                                
+                                // Schedule stop typing after 3 seconds of no changes
+                                typingTask = Task {
+                                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                                    await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false)
+                                }
+                            } else {
+                                // User cleared text - stop typing immediately
+                                Task {
+                                    await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false)
+                                }
+                            }
+                        }
                     
                     Button {
                         sendReply()
@@ -171,13 +221,71 @@ struct ThreadOverlayView: View {
                 }
             }
             
+            // Listen to typing indicators
+            typingListener = store.listenTyping(conversationId: conversationId) { typingMap in
+                Task { @MainActor in
+                    let me = Auth.auth().currentUser?.uid
+                    let now = Date()
+                    
+                    var someoneElseTyping = false
+                    for (uid, isTyping) in typingMap {
+                        guard uid != me, isTyping else { continue }
+                        someoneElseTyping = true
+                        break
+                    }
+                    
+                    let nowDate = Date()
+                    if someoneElseTyping {
+                        typingLastSeenAt = nowDate
+                        if !othersTyping {
+                            othersTyping = true
+                            typingVisibleSince = nowDate
+                        }
+                    } else {
+                        typingLastSeenAt = nowDate
+                        if othersTyping {
+                            typingHideTask?.cancel()
+                            if let vis = typingVisibleSince {
+                                let shown = nowDate.timeIntervalSince(vis)
+                                if shown < typingMinVisible {
+                                    let wait = typingMinVisible - shown
+                                    typingHideTask = Task { @MainActor in
+                                        try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                                        guard let last = typingLastSeenAt,
+                                              Date().timeIntervalSince(last) >= typingInactivityGrace else { return }
+                                        othersTyping = false
+                                        typingVisibleSince = nil
+                                    }
+                                    return
+                                }
+                            }
+                            othersTyping = false
+                            typingVisibleSince = nil
+                        }
+                    }
+                }
+            }
+            
             // Load calendar status for event creation
             await calendarService.loadCalendarStatus()
         }
         .onDisappear {
-            // Clean up listener when view disappears
+            // Clean up listeners when view disappears
             threadListener?.remove()
             threadListener = nil
+            typingListener?.remove()
+            typingListener = nil
+            
+            // Cancel typing tasks
+            typingTask?.cancel()
+            typingHideTask?.cancel()
+            
+            // Clear typing status
+            if let uid = Auth.auth().currentUser?.uid {
+                Task {
+                    await store.setTyping(conversationId: conversationId, uid: uid, isTyping: false)
+                }
+            }
         }
         .sheet(isPresented: $showCreateEvent) {
             CreateEventView(
@@ -343,68 +451,10 @@ struct ThreadOverlayView: View {
                 )
                 print("✅ [ThreadView] RSVP set to \(status.rawValue)")
                 
-                // Also send a reply message so everyone can see the RSVP
-                try await sendRSVPReply(to: message, status: status)
-                
             } catch {
                 print("❌ [ThreadView] Error setting RSVP: \(error)")
             }
         }
-    }
-    
-    private func sendRSVPReply(to message: Message, status: RSVPStatus) async throws {
-        guard let userId = Auth.auth().currentUser?.uid else { return }
-        
-        // Get user's display name
-        let userDoc = try await Firestore.firestore()
-            .collection("users")
-            .document(userId)
-            .getDocument()
-        
-        let displayName = (userDoc.data()?["displayName"] as? String) ?? 
-                         (userDoc.data()?["email"] as? String) ?? 
-                         "Someone"
-        
-        // Determine the thread ID (root message ID)
-        let threadId = message.threadId ?? message.id
-        
-        // Create reply text with emoji
-        let emoji: String
-        switch status {
-        case .yes: emoji = "✅"
-        case .no: emoji = "❌"
-        case .maybe: emoji = "❓"
-        }
-        
-        let replyText = "\(emoji) **\(displayName)** RSVP'd: **\(status.displayText)**"
-        
-        // Send the reply message
-        let docRef = try await Firestore.firestore()
-            .collection("conversations")
-            .document(conversationId)
-            .collection("messages")
-            .addDocument(data: [
-                "senderId": userId,
-                "text": replyText,
-                "createdAt": FieldValue.serverTimestamp(),
-                "status": "sent",
-                "threadId": threadId,
-                "parentMessageId": message.id,
-                "isAI": true, // Mark as AI since it's auto-generated
-                "replyCount": 0
-            ])
-        
-        // Increment reply count on parent message
-        try await Firestore.firestore()
-            .collection("conversations")
-            .document(conversationId)
-            .collection("messages")
-            .document(message.id)
-            .updateData([
-                "replyCount": FieldValue.increment(Int64(1))
-            ])
-        
-        print("✅ [ThreadView] RSVP reply sent: \(docRef.documentID)")
     }
     
     private func showRSVPList(for message: Message) {
@@ -951,3 +1001,27 @@ private struct OscillatingText: View {
     }
 }
 
+// MARK: - Typing Dots Animation
+private struct TypingDotsView: View {
+    @State private var animating = false
+    
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<3) { index in
+                Circle()
+                    .fill(Color.secondary)
+                    .frame(width: 4, height: 4)
+                    .opacity(animating ? 0.3 : 1.0)
+                    .animation(
+                        Animation.easeInOut(duration: 0.6)
+                            .repeatForever()
+                            .delay(Double(index) * 0.2),
+                        value: animating
+                    )
+            }
+        }
+        .onAppear {
+            animating = true
+        }
+    }
+}
