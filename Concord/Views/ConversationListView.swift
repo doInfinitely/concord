@@ -35,6 +35,11 @@ struct ConversationListView: View {
     @State private var dateRangeEnd: Date?
     @State private var naturalLanguageQuery = ""
     
+    // Global notification tracking
+    @StateObject private var notificationService = NotificationService()
+    @State private var notifiedMessageIds = Set<String>()
+    @State private var globalMessageListeners: [String: ListenerRegistration] = [:]
+    
     private let store = FirestoreService()
     private let aiService = AIService()
 
@@ -268,7 +273,17 @@ struct ConversationListView: View {
             guard let uid = auth.uid else { return }
             _ = store.listenConversations(for: uid) { items in
                 conversations = items
+                
+                // Set up message listeners for all conversations
+                setupGlobalMessageListeners(for: items, currentUserId: uid)
             }
+        }
+        .onDisappear {
+            // Clean up all message listeners
+            for (_, listener) in globalMessageListeners {
+                listener.remove()
+            }
+            globalMessageListeners.removeAll()
         }
         .onChange(of: selectedConversationId) { _, newValue in
             if let id = newValue,
@@ -398,6 +413,129 @@ struct ConversationListView: View {
             // Store the message ID to highlight in ChatView
             // We'll need to pass this through somehow - for now just navigate
         }
+    }
+    
+    // MARK: - Global Notification Methods
+    
+    private func setupGlobalMessageListeners(for conversations: [Conversation], currentUserId: String) {
+        for conversation in conversations {
+            // Skip if we already have a listener for this conversation
+            guard globalMessageListeners[conversation.id] == nil else { continue }
+            
+            // Set up a listener for new messages in this conversation
+            let listener = Firestore.firestore()
+                .collection("conversations")
+                .document(conversation.id)
+                .collection("messages")
+                .order(by: "createdAt", descending: false)
+                .addSnapshotListener { snapshot, error in
+                    guard let snapshot = snapshot else {
+                        print("❌ Error listening for messages in \(conversation.id): \(error?.localizedDescription ?? "unknown")")
+                        return
+                    }
+                    
+                    // Process new messages
+                    for change in snapshot.documentChanges where change.type == .added {
+                        let data = change.document.data()
+                        let messageId = change.document.documentID
+                        let senderId = data["senderId"] as? String ?? ""
+                        let isAI = data["isAI"] as? Bool ?? false
+                        let createdAt = (data["createdAt"] as? Timestamp)?.dateValue()
+                        
+                        // Only notify if:
+                        // 1. Message is not from current user
+                        // 2. Message is not AI
+                        // 3. We haven't notified about this message before
+                        // 4. Message is recent (within last 10 seconds)
+                        // 5. User is NOT currently viewing this conversation
+                        guard senderId != currentUserId,
+                              !isAI,
+                              !self.notifiedMessageIds.contains(messageId),
+                              let createdAt = createdAt,
+                              Date().timeIntervalSince(createdAt) < 10.0,
+                              self.selection?.id != conversation.id else {
+                            continue
+                        }
+                        
+                        // Mark as notified immediately
+                        self.notifiedMessageIds.insert(messageId)
+                        
+                        // Create a full Message object
+                        let message = Message(
+                            id: messageId,
+                            senderId: senderId,
+                            text: data["text"] as? String ?? "",
+                            createdAt: createdAt,
+                            status: data["status"] as? String,
+                            threadId: data["threadId"] as? String,
+                            parentMessageId: data["parentMessageId"] as? String,
+                            replyCount: data["replyCount"] as? Int ?? 0,
+                            isAI: isAI,
+                            visibleTo: data["visibleTo"] as? [String],
+                            aiAction: data["aiAction"] as? String,
+                            rsvpData: data["rsvpData"] as? [String: String],
+                            eventTitle: data["eventTitle"] as? String,
+                            eventDate: (data["eventDate"] as? Timestamp)?.dateValue()
+                        )
+                        
+                        // Show notification
+                        Task {
+                            await showNotificationForNewMessage(message, in: conversation)
+                        }
+                    }
+                }
+            
+            globalMessageListeners[conversation.id] = listener
+        }
+        
+        // Clean up listeners for conversations that no longer exist
+        let currentConvoIds = Set(conversations.map { $0.id })
+        for (convoId, listener) in globalMessageListeners where !currentConvoIds.contains(convoId) {
+            listener.remove()
+            globalMessageListeners.removeValue(forKey: convoId)
+        }
+    }
+    
+    private func showNotificationForNewMessage(_ message: Message, in conversation: Conversation) async {
+        // Get sender display name
+        let senderName: String
+        do {
+            let userDoc = try await Firestore.firestore()
+                .collection("users")
+                .document(message.senderId)
+                .getDocument()
+            
+            if let userData = userDoc.data() {
+                senderName = (userData["displayName"] as? String) ?? 
+                            (userData["email"] as? String) ?? 
+                            "Someone"
+            } else {
+                senderName = "Someone"
+            }
+        } catch {
+            print("❌ Error fetching sender info: \(error)")
+            senderName = "Someone"
+        }
+        
+        // Get conversation title
+        let conversationTitle: String
+        if let name = conversation.name {
+            conversationTitle = name
+        } else if conversation.memberCount == 2 {
+            conversationTitle = senderName
+        } else {
+            conversationTitle = "Group Chat"
+        }
+        
+        // Show the notification
+        await notificationService.showNotificationForMessage(
+            messageId: message.id,
+            messageText: message.text,
+            senderName: senderName,
+            conversationId: conversation.id,
+            conversationName: conversationTitle,
+            isGroupChat: conversation.memberCount > 2
+        )
     }
 }
 
